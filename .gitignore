@@ -1,0 +1,15 @@
+# Environment variables — JANGAN commit ke git, berisi secret/API key
+.env
+
+# Binary hasil build
+koperasi-digital
+koperasi-digital.exe
+
+# Go test cache & coverage
+*.test
+*.out
+coverage.html
+
+# OS
+.DS_Store
+Thumbs.db

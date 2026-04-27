@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(go vet *)",
+      "Bash(POLYGON_RPC_URL=\"https://polygon-amoy.g.alchemy.com/v2/XMDDgE2h0q7gEu72AVl39\" go run ./cmd/checkconn)",
+      "Bash(grep -q \"^\\\\.env$\")",
+      "Bash(npm --version)",
+      "Bash(npx --version)",
+      "Bash(npx create-next-app@latest koperasi-frontend --typescript --tailwind --eslint --app --src-dir --import-alias '@/*' --no-turbopack --yes)",
+      "Bash(npm install *)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); ['next','axios','js-cookie','ethers'].forEach\\(k=>console.log\\(k, p.dependencies[k]\\)\\)\")"
+    ]
+  }
+}
