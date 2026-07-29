@@ -18,9 +18,14 @@ package blockchain
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"fmt"
 	"log"
+	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
@@ -31,7 +36,8 @@ import (
 //   - Memudahkan penambahan retry logic, circuit breaker, atau metrics di satu tempat.
 //   - Menyederhanakan mock saat unit testing (cukup mock interface, bukan ethclient asli).
 type Client struct {
-	eth *ethclient.Client
+	eth     *ethclient.Client
+	chainID int64 // disimpan untuk pembuatan TransactOpts
 }
 
 // NewEVMClient menghubungkan backend ke node EVM via JSON-RPC dan memverifikasi
@@ -75,7 +81,7 @@ func NewEVMClient(rpcURL string) (*Client, error) {
 
 	log.Printf("[blockchain] EVM client aktif — chain ID: %s", chainID.String())
 
-	return &Client{eth: eth}, nil
+	return &Client{eth: eth, chainID: chainID.Int64()}, nil
 }
 
 // Underlying mengembalikan *ethclient.Client asli dari go-ethereum.
@@ -99,4 +105,59 @@ func (c *Client) Underlying() *ethclient.Client {
 //	defer client.Close()
 func (c *Client) Close() {
 	c.eth.Close()
+}
+
+// NewTransactOpts membuat bind.TransactOpts dari private key hex string.
+//
+// TransactOpts digunakan untuk menandatangani setiap transaksi yang dikirim
+// ke Smart Contract. Objek ini berisi:
+//   - Private key → untuk signing (ECDSA secp256k1).
+//   - Chain ID    → untuk EIP-155 replay protection.
+//   - GasPrice    → nil agar node menentukan otomatis via eth_gasPrice.
+//   - GasLimit    → 0 agar node mengestimasi via eth_estimateGas.
+//
+// Parameter:
+//   - privateKeyHex: private key dalam format hex, dengan atau tanpa prefix "0x".
+//     Contoh: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+//
+// Mengembalikan error jika:
+//   - privateKeyHex bukan hex yang valid.
+//   - Gagal membuat signer untuk chain ID yang aktif.
+func (c *Client) NewTransactOpts(privateKeyHex string) (*bind.TransactOpts, error) {
+	// Hapus prefix "0x" jika ada — crypto.HexToECDSA tidak menerima prefix.
+	privateKeyHex = strings.TrimPrefix(privateKeyHex, "0x")
+
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("gagal parse private key: %w", err)
+	}
+
+	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, common.Big0.SetInt64(c.chainID))
+	if err != nil {
+		return nil, fmt.Errorf("gagal membuat TransactOpts untuk chain ID %d: %w", c.chainID, err)
+	}
+
+	// GasPrice = nil → node akan menentukan harga gas otomatis via eth_gasPrice.
+	// Ini lebih aman daripada hardcode karena gas price di Polygon bisa fluktuatif.
+	auth.GasPrice = nil
+
+	// GasLimit = 0 → node akan mengestimasi gas via eth_estimateGas.
+	// Untuk fungsi mint sederhana, estimasi node biasanya akurat.
+	auth.GasLimit = 0
+
+	log.Printf("[blockchain] TransactOpts berhasil dibuat — address: %s",
+		crypto.PubkeyToAddress(*privateKey.Public().(*ecdsa.PublicKey)).Hex())
+
+	return auth, nil
+}
+
+// ParseContractAddress memvalidasi dan mengonversi string alamat kontrak
+// menjadi common.Address.
+//
+// Mengembalikan error jika format alamat tidak valid (bukan hex 40 karakter).
+func ParseContractAddress(addressHex string) (common.Address, error) {
+	if !common.IsHexAddress(addressHex) {
+		return common.Address{}, fmt.Errorf("alamat kontrak tidak valid: %s", addressHex)
+	}
+	return common.HexToAddress(addressHex), nil
 }

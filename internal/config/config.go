@@ -36,6 +36,21 @@ type Config struct {
 	//   Alchemy       : https://polygon-mainnet.g.alchemy.com/v2/<API_KEY>
 	// Jika kosong, EVM client tidak diinisialisasi (fitur blockchain dinonaktifkan).
 	PolygonRPCURL string
+
+	// OwnerPrivateKey adalah hex-encoded private key wallet owner Smart Contract.
+	// Digunakan oleh GoldWorker untuk menandatangani transaksi mint/burn on-chain.
+	// Format: dengan atau tanpa prefix "0x", contoh: "0xabc123..." atau "abc123..."
+	// Jika kosong, GoldWorker akan skip operasi blockchain (hanya log).
+	//
+	// KEAMANAN: Jangan pernah commit nilai ini ke version control.
+	// Gunakan environment variable atau secret manager di production.
+	OwnerPrivateKey string
+
+	// GoldContractAddress adalah alamat Smart Contract CoopGold di Polygon.
+	// Format: "0x" + 40 karakter hexadecimal.
+	// Contoh: "0x1234567890abcdef1234567890abcdef12345678"
+	// Jika kosong, GoldWorker akan skip operasi blockchain.
+	GoldContractAddress string
 }
 
 // DBConfig menyimpan parameter koneksi PostgreSQL beserta pengaturan connection pool.
@@ -78,6 +93,10 @@ func Load() *Config {
 
 		FrontendURL:   getEnv("FRONTEND_URL", "http://localhost:3000"),
 		PolygonRPCURL: getEnv("POLYGON_RPC_URL", ""),
+
+		// Blockchain — Smart Contract
+		OwnerPrivateKey:     getEnv("OWNER_PRIVATE_KEY", ""),
+		GoldContractAddress: getEnv("GOLD_CONTRACT_ADDRESS", ""),
 
 		DB: DBConfig{
 			Host:     getEnv("DB_HOST", "localhost"),

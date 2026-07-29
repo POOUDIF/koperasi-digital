@@ -46,6 +46,22 @@ type GoldRepository interface {
 	// Mengembalikan pointer ke GoldTransaction yang sudah terisi id dan created_at.
 	// Error spesifik: ErrSavingsAccountNotFound, ErrAccountNotActive, ErrInsufficientBalance.
 	BuyWithDebit(ctx context.Context, userID int64, accountID int64, gramAmount float64, pricePerGram float64, totalRupiah float64) (*model.GoldTransaction, error)
+
+	// FindPending mengambil semua transaksi emas berstatus 'pending'.
+	//
+	// Dipanggil oleh GoldWorker setiap tick untuk menemukan transaksi yang
+	// perlu dikirim ke blockchain. Hasil diurutkan berdasarkan created_at ASC
+	// agar transaksi terlama diproses terlebih dahulu (FIFO).
+	FindPending(ctx context.Context) ([]model.GoldTransaction, error)
+
+	// UpdateStatusAndHash memperbarui status transaksi emas dan menyimpan tx_hash.
+	//
+	// Dipanggil oleh GoldWorker setelah transaksi berhasil dikirim ke blockchain:
+	//   - status  : "processing" (tx dikirim, menunggu konfirmasi) atau "failed".
+	//   - txHash  : hash transaksi on-chain dari Polygon (format: "0x...").
+	//
+	// Mengembalikan error jika transaksi dengan ID tersebut tidak ditemukan.
+	UpdateStatusAndHash(ctx context.Context, id int64, status string, txHash string) error
 }
 
 // postgresGoldRepository adalah implementasi konkret dengan PostgreSQL.
@@ -211,4 +227,76 @@ func (r *postgresGoldRepository) BuyWithDebit(
 	}
 
 	return goldTx, nil
+}
+
+// FindPending mengambil semua transaksi emas yang masih berstatus 'pending'.
+//
+// Worker blockchain memanggil method ini setiap interval (default 5 detik)
+// untuk menemukan transaksi yang perlu dikirim ke Smart Contract di Polygon.
+//
+// Urutan created_at ASC memastikan transaksi terlama diproses duluan (FIFO),
+// mencegah starvation jika ada lonjakan transaksi baru.
+func (r *postgresGoldRepository) FindPending(ctx context.Context) ([]model.GoldTransaction, error) {
+	query := `
+		SELECT id, user_id, type, gram_amount, price_per_gram,
+		       total_rupiah, tx_hash, status, created_at
+		FROM   gold_transactions
+		WHERE  status = 'pending'
+		ORDER  BY created_at ASC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query transaksi pending gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var txs []model.GoldTransaction
+	for rows.Next() {
+		var t model.GoldTransaction
+		if err := rows.Scan(
+			&t.ID, &t.UserID, &t.Type, &t.GramAmount, &t.PricePerGram,
+			&t.TotalRupiah, &t.TxHash, &t.Status, &t.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaksi pending gagal: %w", err)
+		}
+		txs = append(txs, t)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi rows transaksi pending gagal: %w", err)
+	}
+
+	return txs, nil
+}
+
+// UpdateStatusAndHash memperbarui status dan tx_hash transaksi emas.
+//
+// Query ini sengaja tidak memakai WHERE status = 'pending' sebagai guard
+// karena worker sudah membaca status pending sebelum memanggil fungsi ini.
+// Jika dua worker berjalan paralel (scale-out), perlu ditambahkan
+// SELECT ... FOR UPDATE SKIP LOCKED di FindPending untuk menghindari
+// race condition.
+func (r *postgresGoldRepository) UpdateStatusAndHash(ctx context.Context, id int64, status string, txHash string) error {
+	query := `
+		UPDATE gold_transactions
+		SET    status = $1, tx_hash = $2
+		WHERE  id = $3
+	`
+
+	result, err := r.db.ExecContext(ctx, query, status, txHash, id)
+	if err != nil {
+		return fmt.Errorf("update status transaksi emas ID=%d gagal: %w", id, err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cek rows affected gagal: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("transaksi emas ID=%d tidak ditemukan", id)
+	}
+
+	return nil
 }

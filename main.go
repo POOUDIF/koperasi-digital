@@ -29,6 +29,7 @@ import (
 	"koperasi-digital/internal/middleware"
 	"koperasi-digital/internal/repository"
 	"koperasi-digital/internal/service"
+	"koperasi-digital/internal/worker"
 )
 
 func main() {
@@ -78,10 +79,26 @@ func main() {
 		log.Println("[blockchain] POLYGON_RPC_URL tidak dikonfigurasi, fitur blockchain dinonaktifkan")
 	}
 
-	// --- 5. Setup router ---
+	// --- 5. Buat cancellable context untuk background worker ---
+	// Context ini digunakan sebagai sinyal shutdown untuk semua goroutine
+	// background (worker). Saat cancel() dipanggil, semua worker yang
+	// listening pada ctx.Done() akan berhenti secara graceful.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// --- 6. Setup router ---
 	router := setupRouter(cfg, db, evmClient)
 
-	// --- 5. Jalankan server dengan graceful shutdown ---
+	// --- 7. Inisialisasi dan jalankan background worker ---
+	// GoldWorker memproses transaksi emas 'pending' setiap 5 detik.
+	// Worker berjalan di goroutine terpisah dan berhenti otomatis saat ctx di-cancel.
+	// Jika OwnerPrivateKey atau GoldContractAddress kosong, worker berjalan
+	// dalam mode "log-only" (tidak mengirim transaksi ke blockchain).
+	goldRepo := repository.NewGoldRepository(db)
+	goldWorker := worker.NewGoldWorker(goldRepo, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress, 5*time.Second)
+	go goldWorker.Start(ctx)
+
+	// --- 8. Jalankan server dengan graceful shutdown ---
 	// Graceful shutdown memastikan request yang sedang diproses selesai dulu
 	// sebelum server benar-benar berhenti — penting agar tidak ada transaksi
 	// koperasi yang terpotong di tengah jalan.
@@ -110,11 +127,18 @@ func main() {
 
 	log.Println("[server] menerima sinyal shutdown, menyelesaikan request yang berjalan...")
 
-	// Beri waktu maksimal 30 detik untuk menyelesaikan request yang sedang berjalan.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Langkah 1: Hentikan semua background worker terlebih dahulu.
+	// cancel() mengirim sinyal ke ctx.Done() sehingga GoldWorker (dan worker
+	// lain di masa depan) berhenti memproses pekerjaan baru.
+	cancel()
+	log.Println("[server] background worker dihentikan.")
 
-	if err := srv.Shutdown(ctx); err != nil {
+	// Langkah 2: Shutdown HTTP server.
+	// Beri waktu maksimal 30 detik untuk menyelesaikan request yang sedang berjalan.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("[server] shutdown paksa: %v", err)
 	}
 
