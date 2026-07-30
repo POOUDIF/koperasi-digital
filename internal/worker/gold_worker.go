@@ -1,30 +1,40 @@
 // Package worker — background worker untuk memproses tugas asinkron.
 //
-// Posisi dalam arsitektur:
+// Posisi dalam arsitektur (Event-Driven):
 //
-//	main.go
-//	  ├── HTTP Server (gin)         ← menangani request sinkron
-//	  └── GoldWorker (goroutine)    ← memproses transaksi emas secara asinkron
+//	GoldService.BuyGold()
+//	  └── RPush(queue:gold_mint, txID)   ← trigger setelah DB commit
+//	          ↓  (Redis queue)
+//	  GoldWorker.Start()
+//	    └── BLPop(queue:gold_mint)       ← blocking, bangun saat ada ID masuk
 //	          ↓
-//	      GoldRepository.FindPending()  → cari transaksi pending di PostgreSQL
+//	      GoldRepository.FindByID(txID)  ← ambil detail transaksi dari PostgreSQL
 //	          ↓
-//	      contract.CoopGold.Mint()      → kirim transaksi mint ke Polygon
+//	      contract.CoopGold.Mint()       ← kirim transaksi mint ke Polygon
 //	          ↓
 //	      GoldRepository.UpdateStatusAndHash() → simpan tx_hash, status → 'processing'
 //
-// Worker berjalan di goroutine terpisah dengan time.Ticker dan berhenti
-// secara graceful saat context di-cancel (SIGINT/SIGTERM dari main.go).
+// Keunggulan dibanding polling (time.Ticker):
+//   - Zero latency: worker memproses transaksi sesaat setelah BuyGold berhasil.
+//   - Zero wasted cycles: BLPop hanya membangunkan worker saat ada pekerjaan.
+//   - Graceful shutdown: ctx cancellation men-unblock BLPop secara otomatis.
+//
+// Worker berjalan di goroutine terpisah dan berhenti secara graceful
+// saat context di-cancel (SIGINT/SIGTERM dari main.go).
 package worker
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"math/big"
-	"time"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/redis/go-redis/v9"
 
 	"koperasi-digital/internal/blockchain"
 	"koperasi-digital/internal/blockchain/contract"
@@ -36,44 +46,49 @@ import (
 // Konsisten dengan DECIMAL(10,4) di PostgreSQL dan decimals() di Solidity.
 const goldDecimals = 4
 
-// GoldWorker adalah background worker yang secara periodik memeriksa
-// transaksi emas berstatus 'pending' dan mengirimnya ke Smart Contract.
+// goldMintQueueKey adalah Redis key antrian yang dikonsumsi oleh worker.
+// Harus identik dengan key yang digunakan GoldService saat RPush.
+const goldMintQueueKey = "queue:gold_mint"
+
+// GoldWorker adalah background worker event-driven yang memproses transaksi
+// emas dari Redis queue menggunakan BLPop (Blocking Left Pop).
 //
-// Alur per-transaksi:
-//  1. Query transaksi pending dari PostgreSQL.
-//  2. Konversi gram_amount → uint256 (× 10^4).
-//  3. Panggil CoopGold.Mint(to, amount, goldTxID) di Polygon.
-//  4. Simpan tx_hash dan update status → 'processing'.
+// Worker bangun hanya saat ada ID transaksi masuk ke queue — tidak ada polling.
+// Saat menerima ID, worker:
+//  1. Ambil detail transaksi dari PostgreSQL via FindByID.
+//  2. Kirim transaksi Mint ke Smart Contract CoopGold di Polygon.
+//  3. Update status dan tx_hash di PostgreSQL.
 type GoldWorker struct {
 	goldRepo        repository.GoldRepository
+	rdb             *redis.Client          // antrian transaksi — BLPop pada queue:gold_mint
 	evmClient       *blockchain.Client     // nil jika blockchain tidak dikonfigurasi
 	auth            *bind.TransactOpts     // nil jika private key tidak dikonfigurasi
 	contractAddress common.Address         // alamat Smart Contract CoopGold
 	blockchainReady bool                   // true jika semua dependensi blockchain tersedia
-	interval        time.Duration
 }
 
 // NewGoldWorker membuat instance GoldWorker baru.
 //
 // Parameter:
-//   - goldRepo         : repository untuk query dan update transaksi di database.
-//   - evmClient        : klien blockchain (boleh nil — worker akan skip operasi on-chain).
-//   - ownerPrivateKey  : hex-encoded private key owner Smart Contract (boleh kosong).
-//   - contractAddr     : alamat kontrak CoopGold (boleh kosong).
-//   - interval         : jeda antar-tick (default: 5 detik).
+//   - goldRepo        : repository untuk query dan update transaksi di database.
+//   - rdb             : Redis client untuk BLPop pada queue:gold_mint (wajib).
+//   - evmClient       : klien blockchain (boleh nil — worker akan skip operasi on-chain).
+//   - ownerPrivateKey : hex-encoded private key owner Smart Contract (boleh kosong).
+//   - contractAddr    : alamat kontrak CoopGold (boleh kosong).
 //
 // Jika evmClient, ownerPrivateKey, atau contractAddr tidak tersedia,
-// worker akan berjalan dalam mode "log-only" (tidak mengirim transaksi).
+// worker akan berjalan dalam mode "log-only" (tidak mengirim transaksi on-chain),
+// namun tetap mengkonsumsi antrian Redis agar queue tidak menumpuk.
 func NewGoldWorker(
 	goldRepo repository.GoldRepository,
+	rdb *redis.Client,
 	evmClient *blockchain.Client,
 	ownerPrivateKey string,
 	contractAddr string,
-	interval time.Duration,
 ) *GoldWorker {
 	w := &GoldWorker{
 		goldRepo: goldRepo,
-		interval: interval,
+		rdb:      rdb,
 	}
 
 	// Validasi semua dependensi blockchain tersedia.
@@ -111,70 +126,100 @@ func NewGoldWorker(
 //
 // Panggil dengan: go goldWorker.Start(ctx)
 //
-// Loop berjalan setiap interval (default 5 detik):
-//  1. Query transaksi emas berstatus 'pending' via GoldRepository.
-//  2. Kirim transaksi Mint ke Smart Contract (atau log-only jika blockchain tidak tersedia).
-//  3. Berhenti otomatis saat ctx di-cancel (graceful shutdown).
+// Loop berjalan selamanya menggunakan BLPop (blocking) pada "queue:gold_mint":
+//   - Timeout 0  : BLPop menunggu tanpa batas sampai ada data masuk.
+//   - ctx cancel : BLPop otomatis berhenti saat context di-cancel (graceful shutdown).
+//   - Setiap ID  : fetch detail dari PostgreSQL → proses → update status.
+//
+// Tidak ada time.Ticker — zero polling, zero wasted CPU cycles.
 func (w *GoldWorker) Start(ctx context.Context) {
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
-
 	if w.blockchainReady {
-		log.Printf("[gold-worker] dimulai — interval: %s, mode: blockchain", w.interval)
+		log.Println("[gold-worker] dimulai — mode: event-driven (BLPop), blockchain: aktif")
 	} else {
-		log.Printf("[gold-worker] dimulai — interval: %s, mode: log-only", w.interval)
+		log.Println("[gold-worker] dimulai — mode: event-driven (BLPop), blockchain: log-only")
 	}
 
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("[gold-worker] menerima sinyal shutdown, berhenti.")
-			return
+		// BLPop dengan timeout 0 = blocking tanpa batas sampai ada data.
+		// go-redis/v9 menghormati context: saat ctx di-cancel (Ctrl+C / SIGTERM),
+		// BLPop akan return dengan error context.Canceled — graceful shutdown berfungsi.
+		//
+		// result format: []string{keyName, value}
+		// result[0] = "queue:gold_mint"
+		// result[1] = strconv.FormatInt(txID, 10)
+		result, err := w.rdb.BLPop(ctx, 0, goldMintQueueKey).Result()
 
-		case <-ticker.C:
-			w.processPendingTransactions(ctx)
-		}
-	}
-}
-
-// processPendingTransactions mengambil dan memproses semua transaksi pending.
-//
-// Dipisahkan dari Start() agar:
-//   - Mudah di-test secara independen.
-//   - Panic di satu tick tidak menghentikan worker (recover di sini).
-//   - Logika bisa diperluas tanpa mengubah struktur loop utama.
-func (w *GoldWorker) processPendingTransactions(ctx context.Context) {
-	// Recover dari panic agar worker tidak crash — log error dan lanjut ke tick berikutnya.
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[gold-worker] PANIC tertangkap: %v", r)
-		}
-	}()
-
-	txs, err := w.goldRepo.FindPending(ctx)
-	if err != nil {
-		log.Printf("[gold-worker] error saat query transaksi pending: %v", err)
-		return
-	}
-
-	if len(txs) == 0 {
-		return
-	}
-
-	log.Printf("[gold-worker] ditemukan %d transaksi pending", len(txs))
-
-	for _, tx := range txs {
-		log.Printf("[gold-worker] memproses transaksi ID=%d | user=%d | %.4f gram | Rp%.2f",
-			tx.ID, tx.UserID, tx.GramAmount, tx.TotalRupiah)
-
-		if !w.blockchainReady {
-			log.Printf("[gold-worker] [log-only] skip transaksi ID=%d — blockchain belum dikonfigurasi", tx.ID)
+		if err != nil {
+			// Jika error disebabkan oleh context cancellation (ctx di-cancel saat
+			// shutdown), berhenti dengan bersih tanpa log error yang menakutkan.
+			if isContextError(err) {
+				log.Println("[gold-worker] menerima sinyal shutdown, berhenti.")
+				return
+			}
+			// Error jaringan Redis atau koneksi terputus — log dan coba lagi.
+			// Worker tidak berhenti agar bisa reconnect saat Redis kembali online.
+			log.Printf("[gold-worker] BLPop error: %v — mencoba kembali...", err)
 			continue
 		}
 
-		// --- Kirim transaksi Mint ke Smart Contract ---
-		w.mintOnChain(ctx, tx.ID, tx.GramAmount)
+		// Validasi format hasil BLPop (seharusnya selalu 2 elemen).
+		if len(result) < 2 {
+			log.Printf("[gold-worker] BLPop hasil tidak valid: %v", result)
+			continue
+		}
+
+		// Parse ID transaksi dari string ke int64.
+		txID, parseErr := strconv.ParseInt(result[1], 10, 64)
+		if parseErr != nil {
+			log.Printf("[gold-worker] gagal parse ID transaksi '%s': %v", result[1], parseErr)
+			continue
+		}
+
+		log.Printf("[gold-worker] menerima ID transaksi dari queue: %d", txID)
+
+		// Proses transaksi dalam fungsi terpisah dengan recovery dari panic.
+		w.processTransaction(ctx, txID)
 	}
+}
+
+// processTransaction mengambil dan memproses satu transaksi emas berdasarkan ID.
+//
+// Dipisahkan dari Start() agar:
+//   - Panic di satu transaksi tidak menghentikan seluruh worker loop.
+//   - Logika bisa diperluas (misalnya: retry, dead letter queue) tanpa
+//     mengubah struktur loop utama.
+func (w *GoldWorker) processTransaction(ctx context.Context, txID int64) {
+	// Recover dari panic agar worker tidak crash dan loop tetap berjalan.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[gold-worker] PANIC tertangkap saat memproses ID=%d: %v", txID, r)
+		}
+	}()
+
+	// Ambil detail transaksi dari PostgreSQL berdasarkan ID.
+	tx, err := w.goldRepo.FindByID(ctx, txID)
+	if err != nil {
+		log.Printf("[gold-worker] gagal mengambil transaksi ID=%d: %v", txID, err)
+		return
+	}
+
+	log.Printf("[gold-worker] memproses transaksi ID=%d | user=%d | %.4f gram | Rp%.2f | status=%s",
+		tx.ID, tx.UserID, tx.GramAmount, tx.TotalRupiah, tx.Status)
+
+	// Guard: skip jika transaksi sudah tidak lagi berstatus 'pending'.
+	// Ini bisa terjadi jika ID yang sama masuk 2x ke queue (rare edge case).
+	if tx.Status != "pending" {
+		log.Printf("[gold-worker] transaksi ID=%d status='%s' (bukan pending), dilewati", txID, tx.Status)
+		return
+	}
+
+	if !w.blockchainReady {
+		log.Printf("[gold-worker] [log-only] transaksi ID=%d diterima — blockchain belum dikonfigurasi", txID)
+		return
+	}
+
+	// Kirim transaksi Mint ke Smart Contract.
+	w.mintOnChain(ctx, tx.ID, tx.GramAmount)
 }
 
 // mintOnChain mengirim satu transaksi Mint ke Smart Contract CoopGold.
@@ -183,7 +228,8 @@ func (w *GoldWorker) processPendingTransactions(ctx context.Context) {
 //  1. Konversi gram_amount (float64) → big.Int dengan presisi 4 desimal.
 //  2. Buat instance binding CoopGold.
 //  3. Panggil Mint(auth, recipientAddr, amount, goldTxID).
-//  4. Ambil tx_hash dan update database.
+//  4. Simpan tx_hash dan update status → 'processing'.
+//  5. Launch goroutine awaitReceipt untuk menunggu konfirmasi blok.
 //
 // Catatan: recipientAddr sementara menggunakan address owner karena model User
 // belum memiliki kolom wallet_address. Akan diubah di tahap berikutnya.
@@ -210,7 +256,8 @@ func (w *GoldWorker) mintOnChain(ctx context.Context, goldTxID int64, gramAmount
 	chainTx, err := coopGold.Mint(w.auth, recipientAddr, amount, big.NewInt(goldTxID))
 	if err != nil {
 		log.Printf("[gold-worker] GAGAL mint transaksi ID=%d: %v", goldTxID, err)
-		// Update status ke 'failed' tanpa tx_hash.
+		// Update status ke 'failed' tanpa tx_hash — belum ada on-chain activity,
+		// tidak perlu refund karena tx tidak sempat di-broadcast ke chain.
 		if updateErr := w.goldRepo.UpdateStatusAndHash(ctx, goldTxID, "failed", ""); updateErr != nil {
 			log.Printf("[gold-worker] gagal update status failed ID=%d: %v", goldTxID, updateErr)
 		}
@@ -221,9 +268,120 @@ func (w *GoldWorker) mintOnChain(ctx context.Context, goldTxID int64, gramAmount
 	txHash := chainTx.Hash().Hex()
 	if err := w.goldRepo.UpdateStatusAndHash(ctx, goldTxID, "processing", txHash); err != nil {
 		log.Printf("[gold-worker] gagal update status processing ID=%d: %v", goldTxID, err)
+		// Transaksi sudah di-broadcast tapi DB belum terupdate.
+		// tx_hash sudah ada di chain — tidak ada tindakan darurat yang bisa dilakukan.
+		// Monitoring / reconciliation tool perlu menangani ini.
 		return
 	}
 
-	log.Printf("[gold-worker] ✓ transaksi ID=%d berhasil dikirim — tx_hash: %s | amount: %d unit",
+	log.Printf("[gold-worker] transaksi ID=%d dikirim ke chain — tx_hash: %s | amount: %d unit",
 		goldTxID, txHash, unitAmount)
+
+	// --- 6. Launch goroutine untuk menunggu konfirmasi blok ---
+	// awaitReceipt berjalan di goroutine terpisah agar BLPop loop tidak blocked.
+	// Worker tetap bisa memproses ID berikutnya dari queue (~2 detik konfirmasi Polygon).
+	go w.awaitReceipt(ctx, goldTxID, coopGold, chainTx)
+}
+
+// awaitReceipt menunggu konfirmasi blockchain dan mengupdate status transaksi.
+//
+// Fungsi ini berjalan di goroutine terpisah (dipanggil via `go w.awaitReceipt(...)`).
+//
+// Alur:
+//  1. bind.WaitMined() — blocking sampai transaksi masuk ke blok.
+//  2. Cek receipt.Status:
+//     → 1 (sukses) : parse event GoldMinted untuk validasi, update DB → 'success'.
+//     → 0 (reverted): trigger RefundFailedTransaction (atomik: refund + status failed).
+//
+// Graceful shutdown: jika ctx di-cancel saat menunggu, WaitMined return
+// error context.Canceled — ditangani oleh isContextError, status tetap
+// 'processing' di DB dan bisa di-recover saat server restart.
+func (w *GoldWorker) awaitReceipt(ctx context.Context, goldTxID int64, coopGold *contract.CoopGold, chainTx *types.Transaction) {
+	log.Printf("[gold-worker] menunggu konfirmasi blok untuk ID=%d (tx: %s)...",
+		goldTxID, chainTx.Hash().Hex())
+
+	// WaitMined memblokir sampai transaksi dikonfirmasi oleh minimal 1 blok.
+	// Pada Polygon Amoy, biasanya ~2 detik. Pada Mainnet bisa lebih lama.
+	receipt, err := bind.WaitMined(ctx, w.evmClient.Underlying(), chainTx)
+	if err != nil {
+		if isContextError(err) {
+			// Shutdown bersih — status tetap 'processing' di DB.
+			// Recovery: saat server restart, transaksi ini bisa di-check ulang
+			// via tx_hash yang sudah tersimpan.
+			log.Printf("[gold-worker] WaitMined dibatalkan saat shutdown — ID=%d status tetap 'processing'", goldTxID)
+			return
+		}
+		// Error jaringan (node down, timeout, dll.) — log dan biarkan status 'processing'.
+		// Jangan trigger refund karena transaksi mungkin sudah masuk ke chain.
+		log.Printf("[gold-worker] WaitMined error untuk ID=%d: %v — status tetap 'processing'", goldTxID, err)
+		return
+	}
+
+	// --- Cek receipt.Status ---
+	switch receipt.Status {
+	case types.ReceiptStatusSuccessful: // == 1
+		// Transaksi dikonfirmasi sukses oleh EVM.
+
+		// Opsional: parse event GoldMinted untuk validasi goldTxID on-chain.
+		// Ini memberikan kepastian bahwa event yang tepat ter-emit di blok ini.
+		w.validateGoldMintedEvent(receipt, goldTxID, coopGold)
+
+		// Update status → 'success'
+		if updErr := w.goldRepo.UpdateTransactionStatus(ctx, goldTxID, "success"); updErr != nil {
+			log.Printf("[gold-worker] gagal update status success ID=%d: %v", goldTxID, updErr)
+			return
+		}
+		log.Printf("[gold-worker] ✓ transaksi ID=%d dikonfirmasi ON-CHAIN — status: success | blok: %s",
+			goldTxID, receipt.BlockNumber.String())
+
+	case types.ReceiptStatusFailed: // == 0
+		// Transaksi di-revert oleh EVM (contoh: require() gagal di Solidity).
+		// Trigger refund atomik: kembalikan saldo + catat log + set status failed.
+		log.Printf("[gold-worker] transaksi ID=%d di-REVERT oleh EVM — memulai proses refund...", goldTxID)
+
+		if refundErr := w.goldRepo.RefundFailedTransaction(ctx, goldTxID); refundErr != nil {
+			log.Printf("[gold-worker] KRITIS: refund gagal untuk ID=%d: %v", goldTxID, refundErr)
+			// Jangan update status — biarkan tetap 'processing' agar monitoring
+			// bisa mendeteksi dan operator bisa intervensi manual.
+			return
+		}
+		log.Printf("[gold-worker] ✓ refund selesai untuk transaksi ID=%d — saldo anggota dikembalikan", goldTxID)
+
+	default:
+		log.Printf("[gold-worker] receipt.Status tidak dikenal (%d) untuk ID=%d — tidak ada aksi",
+			receipt.Status, goldTxID)
+	}
+}
+
+// validateGoldMintedEvent mem-parse log receipt untuk menemukan dan memvalidasi
+// event GoldMinted yang sesuai dengan goldTxID.
+//
+// Fungsi ini bersifat informatif (non-blocking): jika event tidak ditemukan
+// atau goldTxID tidak cocok, hanya di-log sebagai peringatan — tidak menggagalkan
+// alur utama. Transaksi on-chain tetap dianggap sukses jika receipt.Status == 1.
+func (w *GoldWorker) validateGoldMintedEvent(receipt *types.Receipt, goldTxID int64, coopGold *contract.CoopGold) {
+	for _, vLog := range receipt.Logs {
+		event, err := coopGold.ParseGoldMinted(*vLog)
+		if err != nil {
+			// Bukan event GoldMinted — lewati
+			continue
+		}
+
+		// Validasi: goldTxID on-chain harus cocok dengan yang ada di DB.
+		if event.GoldTxID.Int64() != goldTxID {
+			log.Printf("[gold-worker] PERINGATAN: GoldTxID on-chain (%d) tidak cocok dengan DB (%d)",
+				event.GoldTxID.Int64(), goldTxID)
+			continue
+		}
+
+		log.Printf("[gold-worker] event GoldMinted tervalidasi — to: %s | amount: %s unit | txID: %d",
+			event.To.Hex(), event.Amount.String(), goldTxID)
+		return // event pertama yang cocok sudah cukup
+	}
+}
+
+// isContextError mengembalikan true jika error disebabkan oleh context cancellation.
+// Digunakan untuk membedakan shutdown yang disengaja dari error jaringan.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

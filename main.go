@@ -21,6 +21,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 
 	"koperasi-digital/internal/blockchain"
 	"koperasi-digital/internal/config"
@@ -60,7 +61,23 @@ func main() {
 		}
 	}()
 
-	// --- 4. Inisialisasi EVM Client (opsional) ---
+	// --- 4. Inisialisasi Redis client ---
+	// Redis digunakan untuk dua tujuan:
+	//   1. Caching harga emas (TTL 15 menit) — mengurangi beban query PostgreSQL.
+	//   2. Message queue "queue:gold_mint" — trigger event-driven ke GoldWorker.
+	// Jika Redis gagal terhubung, aplikasi dihentikan (Fatal) karena arsitektur
+	// event-driven bergantung pada Redis untuk memproses transaksi.
+	redisClient, err := database.NewRedisClient(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("[redis] gagal terhubung ke Redis: %v", err)
+	}
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("[redis] error saat menutup koneksi: %v", err)
+		}
+	}()
+
+	// --- 5. Inisialisasi EVM Client (opsional) ---
 	// EVM client hanya diinisialisasi jika POLYGON_RPC_URL dikonfigurasi.
 	// Jika kosong, fitur blockchain dinonaktifkan dan server tetap berjalan normal.
 	// Ini memungkinkan development offline tanpa memerlukan koneksi ke node Polygon.
@@ -79,23 +96,24 @@ func main() {
 		log.Println("[blockchain] POLYGON_RPC_URL tidak dikonfigurasi, fitur blockchain dinonaktifkan")
 	}
 
-	// --- 5. Buat cancellable context untuk background worker ---
+	// --- 6. Buat cancellable context untuk background worker ---
 	// Context ini digunakan sebagai sinyal shutdown untuk semua goroutine
 	// background (worker). Saat cancel() dipanggil, semua worker yang
 	// listening pada ctx.Done() akan berhenti secara graceful.
+	// BLPop di GoldWorker juga akan di-unblock oleh context cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// --- 6. Setup router ---
-	router := setupRouter(cfg, db, evmClient)
+	// --- 7. Setup router ---
+	router := setupRouter(cfg, db, redisClient, evmClient)
 
-	// --- 7. Inisialisasi dan jalankan background worker ---
-	// GoldWorker memproses transaksi emas 'pending' setiap 5 detik.
-	// Worker berjalan di goroutine terpisah dan berhenti otomatis saat ctx di-cancel.
+	// --- 8. Inisialisasi dan jalankan background worker (Event-Driven) ---
+	// GoldWorker memproses transaksi emas menggunakan BLPop pada "queue:gold_mint".
+	// Worker bangun hanya saat ada transaksi baru — tidak ada polling.
 	// Jika OwnerPrivateKey atau GoldContractAddress kosong, worker berjalan
 	// dalam mode "log-only" (tidak mengirim transaksi ke blockchain).
-	goldRepo := repository.NewGoldRepository(db)
-	goldWorker := worker.NewGoldWorker(goldRepo, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress, 5*time.Second)
+	goldRepo := repository.NewGoldRepository(db, redisClient)
+	goldWorker := worker.NewGoldWorker(goldRepo, redisClient, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress)
 	go goldWorker.Start(ctx)
 
 	// --- 8. Jalankan server dengan graceful shutdown ---
@@ -150,7 +168,7 @@ func main() {
 //
 // Dependency Injection dilakukan di sini: DB → Repository → Service → Handler.
 // Setiap layer hanya tahu tentang layer di bawahnya melalui interface.
-func setupRouter(cfg *config.Config, db *sql.DB, evmClient *blockchain.Client) *gin.Engine {
+func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *blockchain.Client) *gin.Engine {
 	router := gin.New()
 
 	// --- CORS harus didaftarkan PERTAMA, sebelum middleware lain ---
@@ -198,7 +216,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, evmClient *blockchain.Client) *
 	userRepo := repository.NewUserRepository(db)
 	savingRepo := repository.NewSavingRepository(db)
 	financingRepo := repository.NewFinancingRepository(db)
-	goldRepo := repository.NewGoldRepository(db)
+	goldRepo := repository.NewGoldRepository(db, rdb)
 
 	// Layer 2: Service — tahu tentang Repository (via interface), bukan *sql.DB
 	userSvc := service.NewUserService(
@@ -208,7 +226,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, evmClient *blockchain.Client) *
 	)
 	savingSvc := service.NewSavingService(savingRepo)
 	financingSvc := service.NewFinancingService(financingRepo)
-	goldSvc := service.NewGoldService(goldRepo)
+	goldSvc := service.NewGoldService(goldRepo, rdb)
 
 	// Layer 3: Handler — tahu tentang Service (via interface), bukan Repository
 	userH := handler.NewUserHandler(userSvc)

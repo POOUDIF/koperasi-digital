@@ -161,3 +161,23 @@ func ParseContractAddress(addressHex string) (common.Address, error) {
 	}
 	return common.HexToAddress(addressHex), nil
 }
+
+// GetTransactor membuat *bind.TransactOpts dari private key hex string.
+//
+// Fungsi ini adalah alias publik dari NewTransactOpts dengan nama yang lebih
+// deskriptif. Gunakan GetTransactor saat membuat signer untuk setiap batch
+// transaksi baru (misalnya: tiap sesi worker restart) karena TransactOpts
+// tidak goroutine-safe jika digunakan bersamaan dari beberapa goroutine.
+//
+// Parameter:
+//   - privateKeyHex: private key dalam format hex, dengan atau tanpa prefix "0x".
+//
+// Contoh penggunaan:
+//
+//	auth, err := evmClient.GetTransactor(cfg.OwnerPrivateKey)
+//	if err != nil { ... }
+//	tx, err := coopGold.Mint(auth, recipientAddr, amount, goldTxID)
+func (c *Client) GetTransactor(privateKeyHex string) (*bind.TransactOpts, error) {
+	return c.NewTransactOpts(privateKeyHex)
+}
+

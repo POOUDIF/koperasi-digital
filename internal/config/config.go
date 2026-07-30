@@ -28,6 +28,12 @@ type Config struct {
 	// Production  : https://koperasi.id  (atau domain frontend production)
 	FrontendURL string
 
+	// Redis
+	// RedisURL adalah alamat server Redis dalam format "host:port".
+	// Digunakan untuk caching harga emas dan message queue transaksi.
+	// Default: "localhost:6379"
+	RedisURL string
+
 	// Blockchain
 	// PolygonRPCURL adalah URL endpoint JSON-RPC node Polygon.
 	// Contoh:
@@ -92,6 +98,7 @@ func Load() *Config {
 		JWTTokenTTL: time.Duration(getEnvInt("JWT_TOKEN_TTL_HOURS", 24)) * time.Hour,
 
 		FrontendURL:   getEnv("FRONTEND_URL", "http://localhost:3000"),
+		RedisURL:      getEnv("REDIS_URL", "localhost:6379"),
 		PolygonRPCURL: getEnv("POLYGON_RPC_URL", ""),
 
 		// Blockchain — Smart Contract
