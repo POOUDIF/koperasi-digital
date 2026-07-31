@@ -38,6 +38,7 @@ import (
 
 	"koperasi-digital/internal/blockchain"
 	"koperasi-digital/internal/blockchain/contract"
+	"koperasi-digital/internal/model"
 	"koperasi-digital/internal/repository"
 )
 
@@ -60,11 +61,12 @@ const goldMintQueueKey = "queue:gold_mint"
 //  3. Update status dan tx_hash di PostgreSQL.
 type GoldWorker struct {
 	goldRepo        repository.GoldRepository
-	rdb             *redis.Client          // antrian transaksi — BLPop pada queue:gold_mint
-	evmClient       *blockchain.Client     // nil jika blockchain tidak dikonfigurasi
-	auth            *bind.TransactOpts     // nil jika private key tidak dikonfigurasi
-	contractAddress common.Address         // alamat Smart Contract CoopGold
-	blockchainReady bool                   // true jika semua dependensi blockchain tersedia
+	userRepo        repository.UserRepository // untuk mengambil wallet_address anggota sebelum mint
+	rdb             *redis.Client             // antrian transaksi — BLPop pada queue:gold_mint
+	evmClient       *blockchain.Client        // nil jika blockchain tidak dikonfigurasi
+	auth            *bind.TransactOpts        // nil jika private key tidak dikonfigurasi
+	contractAddress common.Address            // alamat Smart Contract CoopGold
+	blockchainReady bool                      // true jika semua dependensi blockchain tersedia
 }
 
 // NewGoldWorker membuat instance GoldWorker baru.
@@ -81,6 +83,7 @@ type GoldWorker struct {
 // namun tetap mengkonsumsi antrian Redis agar queue tidak menumpuk.
 func NewGoldWorker(
 	goldRepo repository.GoldRepository,
+	userRepo repository.UserRepository,
 	rdb *redis.Client,
 	evmClient *blockchain.Client,
 	ownerPrivateKey string,
@@ -88,6 +91,7 @@ func NewGoldWorker(
 ) *GoldWorker {
 	w := &GoldWorker{
 		goldRepo: goldRepo,
+		userRepo: userRepo,
 		rdb:      rdb,
 	}
 
@@ -213,13 +217,66 @@ func (w *GoldWorker) processTransaction(ctx context.Context, txID int64) {
 		return
 	}
 
-	if !w.blockchainReady {
-		log.Printf("[gold-worker] [log-only] transaksi ID=%d diterima — blockchain belum dikonfigurasi", txID)
+	// --- Ambil wallet_address anggota dari database ---
+	// wallet_address adalah *string (nullable) — anggota wajib mengisi sebelum bisa
+	// menerima token emas on-chain.
+	recipientAddr, ok := w.resolveRecipientWallet(ctx, txID, tx.UserID)
+	if !ok {
+		// resolveRecipientWallet sudah menangani refund dan logging.
 		return
 	}
 
-	// Kirim transaksi Mint ke Smart Contract.
-	w.mintOnChain(ctx, tx.ID, tx.GramAmount)
+	if !w.blockchainReady {
+		log.Printf("[gold-worker] [log-only] transaksi ID=%d diterima — blockchain belum dikonfigurasi | wallet: %s",
+			txID, recipientAddr.Hex())
+		return
+	}
+
+	// Kirim transaksi Mint ke Smart Contract dengan alamat penerima yang benar.
+	w.mintOnChain(ctx, tx.ID, tx.GramAmount, recipientAddr)
+}
+
+// resolveRecipientWallet mengambil dan memvalidasi wallet_address anggota dari database.
+//
+// Jika wallet_address nil (belum diset oleh anggota):
+//   - Trigger refund saldo secara atomik (goldRepo.RefundFailedTransaction)
+//   - Log peringatan agar admin bisa menindaklanjuti
+//   - Return (zero, false) → caller harus return tanpa memproses lebih lanjut
+//
+// Jika berhasil, return (common.Address, true).
+func (w *GoldWorker) resolveRecipientWallet(ctx context.Context, goldTxID int64, userID int64) (common.Address, bool) {
+	user, err := w.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		log.Printf("[gold-worker] gagal mengambil data user ID=%d untuk transaksi ID=%d: %v", userID, goldTxID, err)
+		return common.Address{}, false
+	}
+
+	// Validasi: wallet_address harus sudah diset oleh anggota.
+	if !isValidWallet(user) {
+		log.Printf("[gold-worker] PERINGATAN: user ID=%d belum set wallet_address — transaksi ID=%d akan di-refund",
+			userID, goldTxID)
+
+		// Refund saldo anggota secara atomik karena token tidak bisa dikirimkan.
+		// RefundFailedTransaction menangani status 'pending' dan 'processing'.
+		if refundErr := w.goldRepo.RefundFailedTransaction(ctx, goldTxID); refundErr != nil {
+			log.Printf("[gold-worker] KRITIS: refund gagal untuk transaksi ID=%d (wallet tidak ada): %v",
+				goldTxID, refundErr)
+		} else {
+			log.Printf("[gold-worker] ✓ refund selesai untuk transaksi ID=%d — wallet belum dikonfigurasi user", goldTxID)
+		}
+		return common.Address{}, false
+	}
+
+	// Parse hex string wallet address ke common.Address.
+	addr := common.HexToAddress(*user.WalletAddress)
+	log.Printf("[gold-worker] wallet penerima untuk user ID=%d: %s", userID, addr.Hex())
+	return addr, true
+}
+
+// isValidWallet mengembalikan true jika user sudah memiliki wallet_address yang valid.
+// Wallet dianggap valid jika field tidak nil dan tidak berupa string kosong.
+func isValidWallet(user *model.User) bool {
+	return user.WalletAddress != nil && *user.WalletAddress != ""
 }
 
 // mintOnChain mengirim satu transaksi Mint ke Smart Contract CoopGold.
@@ -231,9 +288,8 @@ func (w *GoldWorker) processTransaction(ctx context.Context, txID int64) {
 //  4. Simpan tx_hash dan update status → 'processing'.
 //  5. Launch goroutine awaitReceipt untuk menunggu konfirmasi blok.
 //
-// Catatan: recipientAddr sementara menggunakan address owner karena model User
-// belum memiliki kolom wallet_address. Akan diubah di tahap berikutnya.
-func (w *GoldWorker) mintOnChain(ctx context.Context, goldTxID int64, gramAmount float64) {
+// recipientAddr adalah alamat wallet anggota yang sudah divalidasi oleh resolveRecipientWallet.
+func (w *GoldWorker) mintOnChain(ctx context.Context, goldTxID int64, gramAmount float64, recipientAddr common.Address) {
 	// --- 1. Konversi gram → uint256 ---
 	// 0.5 gram × 10^4 = 5_000 unit on-chain.
 	// math.Round memastikan tidak ada floating-point error saat konversi.
@@ -247,12 +303,8 @@ func (w *GoldWorker) mintOnChain(ctx context.Context, goldTxID int64, gramAmount
 		return
 	}
 
-	// --- 3. Tentukan alamat penerima ---
-	// TODO: Ganti dengan wallet_address anggota dari tabel users.
-	// Sementara, token dikirim ke address owner sebagai placeholder.
-	recipientAddr := w.auth.From
-
-	// --- 4. Panggil Mint ---
+	// --- 3. Panggil Mint dengan alamat wallet anggota ---
+	// recipientAddr sudah divalidasi oleh resolveRecipientWallet — bukan owner.
 	chainTx, err := coopGold.Mint(w.auth, recipientAddr, amount, big.NewInt(goldTxID))
 	if err != nil {
 		log.Printf("[gold-worker] GAGAL mint transaksi ID=%d: %v", goldTxID, err)

@@ -496,10 +496,12 @@ func (r *postgresGoldRepository) RefundFailedTransaction(ctx context.Context, go
 		return fmt.Errorf("query transaksi emas ID=%d gagal: %w", goldTxID, err)
 	}
 
-	// Guard: jangan proses refund jika status sudah bukan 'processing'.
-	// Mencegah double-refund jika ada race condition atau restart yang tidak bersih.
-	if currentStatus != "processing" {
-		log.Printf("[gold-repo] RefundFailedTransaction: transaksi ID=%d status='%s' (bukan processing), skip refund",
+	// Guard: hanya proses refund jika status 'pending' atau 'processing'.
+	//   - 'pending'    : transaksi belum sempat dikirim ke chain (misal: wallet belum diset).
+	//   - 'processing' : transaksi sudah dikirim ke chain tapi EVM me-revert (receipt.Status=0).
+	// Status lain ('success', 'failed') berarti sudah final — skip untuk mencegah double-refund.
+	if currentStatus != "processing" && currentStatus != "pending" {
+		log.Printf("[gold-repo] RefundFailedTransaction: transaksi ID=%d status='%s' (sudah final), skip refund",
 			goldTxID, currentStatus)
 		return nil
 	}

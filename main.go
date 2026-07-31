@@ -113,7 +113,10 @@ func main() {
 	// Jika OwnerPrivateKey atau GoldContractAddress kosong, worker berjalan
 	// dalam mode "log-only" (tidak mengirim transaksi ke blockchain).
 	goldRepo := repository.NewGoldRepository(db, redisClient)
-	goldWorker := worker.NewGoldWorker(goldRepo, redisClient, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress)
+	// userRepo diinject ke worker agar bisa mengambil wallet_address anggota sebelum mint.
+	// Menggunakan connection pool yang sama (db) — tidak ada koneksi ekstra.
+	userRepo := repository.NewUserRepository(db)
+	goldWorker := worker.NewGoldWorker(goldRepo, userRepo, redisClient, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress)
 	go goldWorker.Start(ctx)
 
 	// --- 8. Jalankan server dengan graceful shutdown ---
@@ -262,10 +265,10 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 			protected.POST("/savings/deposit", savingH.Deposit)      // Setor tunai
 
 			// --- Modul Pembiayaan Syariah (anggota) ---
-			protected.POST("/financing/apply", financingH.Apply)                             // Ajukan pembiayaan baru
-			protected.GET("/financing", financingH.GetMyFinancings)                          // Lihat daftar pembiayaan saya
-			protected.GET("/financing/:id/installments", financingH.GetInstallments)         // Lihat jadwal cicilan
-			protected.POST("/financing/installments/:id/pay", financingH.PayInstallment)     // Bayar satu cicilan
+			protected.POST("/financing/apply", financingH.Apply)                         // Ajukan pembiayaan baru
+			protected.GET("/financing", financingH.GetMyFinancings)                      // Lihat daftar pembiayaan saya
+			protected.GET("/financing/:id/installments", financingH.GetInstallments)     // Lihat jadwal cicilan
+			protected.POST("/financing/installments/:id/pay", financingH.PayInstallment) // Bayar satu cicilan
 
 			// --- Modul Emas Digital ---
 			protected.POST("/gold/buy", goldH.BuyGold) // Beli emas, debet saldo Wadiah
