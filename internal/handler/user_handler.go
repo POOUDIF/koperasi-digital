@@ -12,6 +12,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -173,4 +174,30 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 	// model.User sudah memiliki `json:"-"` pada PasswordHash,
 	// sehingga field tersebut tidak akan muncul di response JSON.
 	c.JSON(http.StatusOK, user)
+}
+
+// Logout menangani POST /api/v1/logout.
+// Route ini dilindungi oleh middleware.RequireAuth.
+//
+// Menyimpan raw JWT ke dalam memori Redis sehingga tidak bisa digunakan ulang
+// meskipun belum kadaluarsa.
+func (h *UserHandler) Logout(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "header Authorization tidak ada"})
+		return
+	}
+
+	scheme, tokenStr, found := strings.Cut(authHeader, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") || tokenStr == "" {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "format Authorization harus 'Bearer <token>'"})
+		return
+	}
+
+	if err := h.userService.Logout(c.Request.Context(), tokenStr); err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan saat memproses logout"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "logout berhasil"})
 }

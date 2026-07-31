@@ -22,6 +22,11 @@ type Config struct {
 	// Database
 	DB DBConfig
 
+	// Margin Pembiayaan
+	// Nilai desimal yang mengontrol rasio keuntungan Murabahah terhadap principal
+	// Default: 0.10 (10%)
+	MurabahahMarginRate float64
+
 	// Frontend
 	// FrontendURL adalah origin yang diizinkan oleh middleware CORS.
 	// Development : http://localhost:3000
@@ -101,6 +106,8 @@ func Load() *Config {
 		RedisURL:      getEnv("REDIS_URL", "localhost:6379"),
 		PolygonRPCURL: getEnv("POLYGON_RPC_URL", ""),
 
+		MurabahahMarginRate: getEnvFloat("MURABAHAH_MARGIN_RATE", 0.10),
+
 		// Blockchain — Smart Contract
 		OwnerPrivateKey:     getEnv("OWNER_PRIVATE_KEY", ""),
 		GoldContractAddress: getEnv("GOLD_CONTRACT_ADDRESS", ""),
@@ -135,6 +142,15 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback

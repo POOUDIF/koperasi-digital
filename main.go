@@ -233,9 +233,10 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		userRepo,
 		cfg.JWTSecret,
 		cfg.JWTTokenTTL,
+		rdb,
 	)
 	savingSvc := service.NewSavingService(savingRepo)
-	financingSvc := service.NewFinancingService(financingRepo)
+	financingSvc := service.NewFinancingService(financingRepo, cfg.MurabahahMarginRate)
 	goldSvc := service.NewGoldService(goldRepo, rdb)
 
 	// Layer 3: Handler — tahu tentang Service (via interface), bukan Repository
@@ -268,11 +269,12 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		//  2. RequireActiveUserDB: cek status akun dari DB — memastikan akun yang
 		//     di-suspend SETELAH token diterbitkan langsung diblokir pada request berikutnya.
 		protected := v1.Group("",
-			middleware.RequireAuth(cfg.JWTSecret),
+			middleware.RequireAuth(cfg.JWTSecret, rdb),
 			middleware.RequireActiveUserDB(db),
 		)
 		{
 			protected.GET("/profile", userH.GetProfile)
+			protected.POST("/logout", userH.Logout)
 
 			// --- Modul Simpanan Syariah ---
 			protected.POST("/savings/accounts", savingH.OpenAccount) // Buka rekening baru
@@ -299,7 +301,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		// Urutan middleware PENTING: RequireAuth harus lebih dulu karena
 		// RequireRole membaca user_id dari context yang diisi RequireAuth.
 		admin := v1.Group("/admin",
-			middleware.RequireAuth(cfg.JWTSecret),
+			middleware.RequireAuth(cfg.JWTSecret, rdb),
 			middleware.RequireRole(db, "pengurus", "admin", "super_admin"),
 		)
 		{

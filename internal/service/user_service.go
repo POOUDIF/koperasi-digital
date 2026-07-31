@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
 	"koperasi-digital/internal/model"
@@ -55,6 +56,9 @@ type UserService interface {
 	// GetProfile mengambil data user berdasarkan ID.
 	// Dipanggil setelah middleware memverifikasi JWT dan menyematkan user_id ke context.
 	GetProfile(ctx context.Context, userID int64) (*model.User, error)
+
+	// Logout memasukkan token aktif ke dalam Redis blocklist.
+	Logout(ctx context.Context, tokenStr string) error
 }
 
 // userService adalah implementasi konkret UserService.
@@ -62,6 +66,7 @@ type userService struct {
 	userRepo  repository.UserRepository // dependency ke repository layer
 	jwtSecret []byte                    // kunci penandatangan token JWT
 	jwtTTL    time.Duration             // masa berlaku token
+	rdb       *redis.Client             // redis connection
 }
 
 // NewUserService membuat instance service baru dengan dependency yang diinject.
@@ -70,15 +75,18 @@ type userService struct {
 //   - userRepo  : implementasi UserRepository (bisa mock saat testing)
 //   - jwtSecret : string rahasia untuk sign JWT, misalnya dari config
 //   - jwtTTL    : durasi masa berlaku token, misalnya 24 * time.Hour
+//   - rdb       : client redis untuk manipulasi state JWT (pembatalan/logout)
 func NewUserService(
 	userRepo repository.UserRepository,
 	jwtSecret string,
 	jwtTTL time.Duration,
+	rdb *redis.Client,
 ) UserService {
 	return &userService{
 		userRepo:  userRepo,
 		jwtSecret: []byte(jwtSecret),
 		jwtTTL:    jwtTTL,
+		rdb:       rdb,
 	}
 }
 
@@ -203,6 +211,18 @@ func (s *userService) GetProfile(ctx context.Context, userID int64) (*model.User
 	}
 
 	return user, nil
+}
+
+// Logout menyimpan token ke dalam Redis blocklist.
+// Token akan kedaluwarsa sesuai waktu JWTTTL server sehingga ruang Redis
+// dibebaskan otomatis secara sinkron dengan matinya validitas token mandiri.
+func (s *userService) Logout(ctx context.Context, tokenStr string) error {
+	key := "jwt_revoked:" + tokenStr
+	err := s.rdb.SetEx(ctx, key, "revoked", s.jwtTTL).Err()
+	if err != nil {
+		return fmt.Errorf("gagal memblokir token pada memori: %w", err)
+	}
+	return nil
 }
 
 // generateToken membuat JWT yang ditandatangani dengan HMAC-SHA256 (HS256).

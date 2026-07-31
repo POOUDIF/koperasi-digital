@@ -50,10 +50,6 @@ var (
 // Catatan: ErrSavingsAccountNotFound dan ErrAccountNotActive sudah dideklarasikan
 // di saving_service.go dalam package yang sama — tidak perlu didefinisikan ulang.
 
-// murabahahMarginRate adalah nisbah keuntungan koperasi yang ditetapkan secara fixed.
-// 10% dari principal_amount — sesuai kebijakan koperasi versi awal.
-const murabahahMarginRate = 0.10
-
 // FinancingService mendefinisikan kontrak logika bisnis untuk modul pembiayaan.
 type FinancingService interface {
 	// ApplyMurabahah memproses pengajuan pembiayaan akad murabahah.
@@ -86,11 +82,15 @@ type FinancingService interface {
 // financingService adalah implementasi konkret FinancingService.
 type financingService struct {
 	financingRepo repository.FinancingRepository
+	marginRate    float64
 }
 
 // NewFinancingService membuat instance service dengan dependency diinject.
-func NewFinancingService(financingRepo repository.FinancingRepository) FinancingService {
-	return &financingService{financingRepo: financingRepo}
+func NewFinancingService(financingRepo repository.FinancingRepository, marginRate float64) FinancingService {
+	return &financingService{
+		financingRepo: financingRepo,
+		marginRate:    marginRate,
+	}
 }
 
 // ApplyMurabahah memproses pengajuan pembiayaan murabahah oleh anggota.
@@ -103,7 +103,7 @@ func NewFinancingService(financingRepo repository.FinancingRepository) Financing
 //  5. Simpan ke database via repository.
 func (s *financingService) ApplyMurabahah(ctx context.Context, userID int64, req model.ApplyFinancingRequest) (*model.Financing, error) {
 	// Kita gunakan helper roundTo4Decimals agar tidak ada pergeseran presisi.
-	marginAmount := util.RoundTo4Decimals(req.PrincipalAmount * murabahahMarginRate)
+	marginAmount := util.RoundTo4Decimals(req.PrincipalAmount * s.marginRate)
 	totalPayable := util.RoundTo4Decimals(req.PrincipalAmount + marginAmount)
 
 	var saved *model.Financing

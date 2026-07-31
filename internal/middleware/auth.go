@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 // Context key yang dipakai untuk menyimpan & membaca klaim JWT di Gin context.
@@ -37,8 +38,8 @@ type authClaims struct {
 //  5. Jika ada langkah yang gagal → hentikan request dengan 401, handler tidak dijalankan.
 //
 // Menerima jwtSecret sebagai parameter (bukan global variable) agar middleware bisa
-// di-test secara independen dengan secret berbeda.
-func RequireAuth(jwtSecret string) gin.HandlerFunc {
+// di-test secara independen dengan secret berbeda. rdb dipakai untuk validasi blocklist (Logout).
+func RequireAuth(jwtSecret string, rdb *redis.Client) gin.HandlerFunc {
 	secret := []byte(jwtSecret)
 
 	return func(c *gin.Context) {
@@ -54,6 +55,14 @@ func RequireAuth(jwtSecret string) gin.HandlerFunc {
 		scheme, tokenStr, found := strings.Cut(authHeader, " ")
 		if !found || !strings.EqualFold(scheme, "Bearer") || tokenStr == "" {
 			abortUnauthorized(c, "format Authorization harus 'Bearer <token>'")
+			return
+		}
+
+		// Langkah 2.5: Cek token dari Redis blocklist
+		// GAP-10: Token blocklist untuk otorisasi stateful
+		isRevoked, err := rdb.Exists(c.Request.Context(), "jwt_revoked:"+tokenStr).Result()
+		if err == nil && isRevoked > 0 {
+			abortUnauthorized(c, "sesi telah diakhiri, silakan login kembali")
 			return
 		}
 
