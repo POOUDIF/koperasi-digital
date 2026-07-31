@@ -2,9 +2,9 @@
 //
 // Pola yang digunakan: Repository Interface + Concrete Implementation.
 //
-//   UserRepository (interface)
-//       ↑
-//   postgresUserRepository (struct) — implementasi nyata dengan *sql.DB
+//	UserRepository (interface)
+//	    ↑
+//	postgresUserRepository (struct) — implementasi nyata dengan *sql.DB
 //
 // Dengan pola ini, layer service hanya bergantung pada interface, sehingga
 // saat testing kita bisa menyuntikkan mock tanpa menyentuh database sungguhan.

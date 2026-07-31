@@ -134,3 +134,47 @@ func (h *GoldHandler) BuyGold(c *gin.Context) {
 	// 201 Created — transaksi emas berhasil dicatat, menunggu konfirmasi blockchain.
 	c.JSON(http.StatusCreated, goldTx)
 }
+
+// SellGold menangani POST /api/v1/gold/sell.
+//
+// Anggota menjual aset emas mereka. Sistem secara atomik mengkreditkan dana rupiah
+// ke dalam rekening Wadiah, sekaligus merekam histori transaksi.
+//
+// Request body (JSON):
+//
+//	{
+//	  "gram_amount": 0.5,
+//	  "savings_account_id": 3
+//	}
+func (h *GoldHandler) SellGold(c *gin.Context) {
+	userID, ok := extractUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid, silakan login kembali"})
+		return
+	}
+
+	var req model.SellGoldRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	goldTx, err := h.goldService.SellGold(c.Request.Context(), userID, req)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrExceedsTransactionLimit):
+			c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
+		case errors.Is(err, service.ErrGoldPriceNotAvailable):
+			c.JSON(http.StatusServiceUnavailable, errorResponse{Error: err.Error()})
+		case errors.Is(err, service.ErrSavingsAccountNotFound):
+			c.JSON(http.StatusNotFound, errorResponse{Error: "rekening simpanan tidak ditemukan atau bukan milik Anda"})
+		case errors.Is(err, service.ErrAccountNotActive):
+			c.JSON(http.StatusUnprocessableEntity, errorResponse{Error: "rekening simpanan tidak aktif"})
+		default:
+			c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan internal saat menjual emas"})
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, goldTx)
+}

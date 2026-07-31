@@ -40,6 +40,9 @@ const goldMintQueueKey = "queue:gold_mint"
 // Kemungkinan sebab: migration belum dijalankan atau admin belum mengisi harga.
 var ErrGoldPriceNotAvailable = errors.New("harga emas belum tersedia, hubungi admin koperasi")
 
+// ErrExceedsTransactionLimit dikembalikan saat percobaan pembelian atau penjualan melebihi batas (GAP-09).
+var ErrExceedsTransactionLimit = errors.New("maksimal transaksi emas adalah 100 gram per transaksi")
+
 // GoldService mendefinisikan kontrak logika bisnis untuk modul emas.
 // Handler layer hanya bergantung pada interface ini.
 type GoldService interface {
@@ -61,6 +64,9 @@ type GoldService interface {
 	//   ErrAccountNotActive       — rekening dibekukan/ditutup.
 	//   ErrInsufficientBalance    — saldo tidak cukup untuk membeli sejumlah gram itu.
 	BuyGold(ctx context.Context, userID int64, req model.BuyGoldRequest) (*model.GoldTransaction, error)
+
+	// SellGold memproses penjualan emas oleh anggota.
+	SellGold(ctx context.Context, userID int64, req model.SellGoldRequest) (*model.GoldTransaction, error)
 }
 
 // goldService adalah implementasi konkret GoldService.
@@ -102,11 +108,16 @@ func (s *goldService) GetCurrentPrice(ctx context.Context) (*model.GoldPrice, er
 // Seluruh operasi database (validasi saldo, debit, log, insert gold_tx) diserahkan
 // ke repository layer yang menjalankannya dalam satu DB transaction atomik.
 //
-// Setelah DB transaction berhasil commit, ID transaksi di-push ke Redis queue
+// Sesudah DB transaction berhasil commit, ID transaksi di-push ke Redis queue
 // sehingga GoldWorker langsung terbangun dan memproses tanpa menunggu polling.
 // Jika RPush gagal (Redis down), hanya di-log — DB transaction TIDAK di-rollback.
 // Transaksi tetap 'pending' di DB dan bisa diproses oleh mekanisme recovery.
 func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGoldRequest) (*model.GoldTransaction, error) {
+	// GAP-09: Maksimal transaksi 100 Gram.
+	if req.GramAmount > 100 {
+		return nil, ErrExceedsTransactionLimit
+	}
+
 	// --- Langkah 1: Ambil harga emas terbaru ---
 	// Cache-aside dilakukan di repository layer secara transparan.
 	price, err := s.goldRepo.GetCurrentPrice(ctx)
@@ -162,6 +173,38 @@ func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGo
 			log.Printf("[gold-service] PERINGATAN: RPush ke Redis gagal untuk ID=%d: %v", goldTx.ID, pushErr)
 		} else {
 			log.Printf("[gold-service] transaksi ID=%d berhasil dipush ke queue '%s'", goldTx.ID, goldMintQueueKey)
+		}
+	}
+
+	return goldTx, nil
+}
+
+// SellGold mengeksekusi layanan penjualan emas dari saldo pengguna ke koperasi.
+func (s *goldService) SellGold(ctx context.Context, userID int64, req model.SellGoldRequest) (*model.GoldTransaction, error) {
+	if req.GramAmount > 100 {
+		return nil, ErrExceedsTransactionLimit
+	}
+
+	price, err := s.goldRepo.GetCurrentPrice(ctx)
+	if err != nil {
+		if errors.Is(err, repository.ErrGoldPriceNotAvailable) {
+			return nil, ErrGoldPriceNotAvailable
+		}
+		return nil, fmt.Errorf("mengambil harga emas gagal: %w", err)
+	}
+
+	rawTotal := req.GramAmount * price.SellPricePerGram
+	totalRupiah := util.RoundTo4Decimals(rawTotal)
+
+	goldTx, err := s.goldRepo.SellWithCredit(ctx, userID, req.SavingsAccountID, req.GramAmount, price.SellPricePerGram, totalRupiah)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrSavingsAccountNotFound):
+			return nil, ErrSavingsAccountNotFound
+		case errors.Is(err, repository.ErrAccountNotActive):
+			return nil, ErrAccountNotActive
+		default:
+			return nil, fmt.Errorf("penjualan emas gagal: %w", err)
 		}
 	}
 

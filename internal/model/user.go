@@ -9,10 +9,10 @@ import "time"
 // Tag `db` dipakai oleh query manual (lib/pq) untuk mapping kolom.
 // Tag `json:"-"` pada PasswordHash memastikan hash TIDAK PERNAH bocor ke response API.
 type User struct {
-	ID           int64     `db:"id"            json:"id"`
-	NamaLengkap  string    `db:"nama_lengkap"  json:"nama_lengkap"`
-	Email        string    `db:"email"         json:"email"`
-	PasswordHash string    `db:"password_hash" json:"-"` // tidak pernah dikirim ke client
+	ID           int64  `db:"id"            json:"id"`
+	NamaLengkap  string `db:"nama_lengkap"  json:"nama_lengkap"`
+	Email        string `db:"email"         json:"email"`
+	PasswordHash string `db:"password_hash" json:"-"` // tidak pernah dikirim ke client
 
 	// Role menentukan hak akses user di sistem RBAC.
 	// Nilai: "anggota" | "pengurus" | "admin" | "super_admin"

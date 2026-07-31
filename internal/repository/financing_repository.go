@@ -388,13 +388,14 @@ func (r *postgresFinancingRepository) GetInstallmentByID(ctx context.Context, id
 // Dengan satu DB transaction, keduanya berhasil bersama atau keduanya dibatalkan.
 //
 // Urutan operasi:
-//  a. SELECT ... FOR UPDATE pada savings_accounts — kunci baris, validasi user_id,
-//     status, dan kecukupan saldo.
-//  b. UPDATE savings_accounts — kurangi balance sebesar amountDue.
-//  c. INSERT savings_transactions — log debit (withdraw) dengan reference "cicilan_{id}".
-//  d. UPDATE financing_installments — set status='paid', amount_paid, paid_at=NOW().
-//     Klausa AND status='unpaid' mencegah double-payment jika ada race condition.
-//  e. Hitung sisa cicilan unpaid; jika 0 → UPDATE financing status='paid'.
+//
+//	a. SELECT ... FOR UPDATE pada savings_accounts — kunci baris, validasi user_id,
+//	   status, dan kecukupan saldo.
+//	b. UPDATE savings_accounts — kurangi balance sebesar amountDue.
+//	c. INSERT savings_transactions — log debit (withdraw) dengan reference "cicilan_{id}".
+//	d. UPDATE financing_installments — set status='paid', amount_paid, paid_at=NOW().
+//	   Klausa AND status='unpaid' mencegah double-payment jika ada race condition.
+//	e. Hitung sisa cicilan unpaid; jika 0 → UPDATE financing status='paid'.
 func (r *postgresFinancingRepository) PayInstallment(
 	ctx context.Context,
 	installmentID int64,

@@ -180,4 +180,3 @@ func ParseContractAddress(addressHex string) (common.Address, error) {
 func (c *Client) GetTransactor(privateKeyHex string) (*bind.TransactOpts, error) {
 	return c.NewTransactOpts(privateKeyHex)
 }
-

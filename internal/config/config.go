@@ -16,8 +16,8 @@ type Config struct {
 	AppEnv     string // Environment: "development", "production"
 
 	// JWT
-	JWTSecret    string        // Kunci rahasia untuk sign token, WAJIB diisi
-	JWTTokenTTL  time.Duration // Masa berlaku token, default 24 jam
+	JWTSecret   string        // Kunci rahasia untuk sign token, WAJIB diisi
+	JWTTokenTTL time.Duration // Masa berlaku token, default 24 jam
 
 	// Database
 	DB DBConfig

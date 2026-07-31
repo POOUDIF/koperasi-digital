@@ -286,7 +286,8 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 			protected.POST("/financing/installments/:id/pay", financingH.PayInstallment) // Bayar satu cicilan
 
 			// --- Modul Emas Digital ---
-			protected.POST("/gold/buy", goldH.BuyGold) // Beli emas, debet saldo Wadiah
+			protected.POST("/gold/buy", goldH.BuyGold)   // Beli emas, debet saldo Wadiah
+			protected.POST("/gold/sell", goldH.SellGold) // Jual emas, kredit saldo Wadiah
 		}
 
 		// --- Grup Admin: RequireAuth + RequireRole dirantai ---

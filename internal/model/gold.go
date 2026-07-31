@@ -97,3 +97,16 @@ type BuyGoldRequest struct {
 	// Rekening harus aktif dan milik user yang sedang login.
 	SavingsAccountID int64 `json:"savings_account_id" binding:"required,gt=0"`
 }
+
+// SellGoldRequest adalah payload JSON untuk POST /api/v1/gold/sell.
+//
+// Anggota menjual emas mereka dan meminta dana hasil penjualannya dikreditkan
+// ke rekening Wadiah.
+type SellGoldRequest struct {
+	// GramAmount adalah berat emas yang ingin dijual.
+	// Batas minimum 0.0001 gram.
+	GramAmount float64 `json:"gram_amount" binding:"required,min=0.0001"`
+
+	// SavingsAccountID adalah ID rekening simpanan Wadiah penerima transfer.
+	SavingsAccountID int64 `json:"savings_account_id" binding:"required,gt=0"`
+}

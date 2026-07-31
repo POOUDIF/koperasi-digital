@@ -19,8 +19,8 @@ type Simpanan struct {
 type TransaksiSimpanan struct {
 	ID         int64     `db:"id"          json:"id"`
 	SimpananID int64     `db:"simpanan_id" json:"simpanan_id"`
-	Jenis      string    `db:"jenis"       json:"jenis"`    // "setor" | "tarik"
-	Jumlah     float64   `db:"jumlah"      json:"jumlah"`   // selalu positif
+	Jenis      string    `db:"jenis"       json:"jenis"`  // "setor" | "tarik"
+	Jumlah     float64   `db:"jumlah"      json:"jumlah"` // selalu positif
 	Catatan    string    `db:"catatan"     json:"catatan"`
 	CreatedAt  time.Time `db:"created_at"  json:"created_at"`
 }

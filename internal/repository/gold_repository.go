@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"time"
 
@@ -62,6 +62,13 @@ type GoldRepository interface {
 	// Mengembalikan pointer ke GoldTransaction yang sudah terisi id dan created_at.
 	// Error spesifik: ErrSavingsAccountNotFound, ErrAccountNotActive, ErrInsufficientBalance.
 	BuyWithDebit(ctx context.Context, userID int64, accountID int64, gramAmount float64, pricePerGram float64, totalRupiah float64) (*model.GoldTransaction, error)
+
+	// SellWithCredit mengeksekusi penjualan emas anggota secara ATOMIK:
+	//   1. SELECT ... FOR UPDATE (validasi kepemilikan saving account & status active)
+	//   2. UPDATE savings_accounts — TAMBAH balance sebesar totalRupiah.
+	//   3. INSERT savings_transactions — catat kredit (type: 'deposit').
+	//   4. INSERT gold_transactions — catat jual emas (status: 'success').
+	SellWithCredit(ctx context.Context, userID int64, accountID int64, gramAmount float64, pricePerGram float64, totalRupiah float64) (*model.GoldTransaction, error)
 
 	// FindByID mengambil satu transaksi emas berdasarkan ID-nya.
 	//
@@ -155,16 +162,16 @@ func (r *postgresGoldRepository) GetCurrentPrice(ctx context.Context) (*model.Go
 			var p model.GoldPrice
 			jsonErr := json.Unmarshal([]byte(cached), &p)
 			if jsonErr == nil {
-				log.Println("[gold-repo] cache hit — harga emas dari Redis")
+				slog.Info("[gold-repo] cache hit — harga emas dari Redis")
 				return &p, nil
 			}
 			// Data rusak di cache — log dan lanjut ke PostgreSQL
-			log.Printf("[gold-repo] cache data korupsi, query PostgreSQL: %v", jsonErr)
+			slog.Warn("cache data korupsi, query PostgreSQL", "error", jsonErr)
 		} else if !errors.Is(err, redis.Nil) {
 			// Error Redis yang bukan "key tidak ada" — log dan lanjut
-			log.Printf("[gold-repo] Redis Get error (non-fatal): %v", err)
+			slog.Warn("Redis Get error (non-fatal)", "error", err)
 		} else {
-			log.Println("[gold-repo] cache miss — query PostgreSQL")
+			slog.Info("[gold-repo] cache miss — query PostgreSQL")
 		}
 	}
 
@@ -197,7 +204,7 @@ func (r *postgresGoldRepository) GetCurrentPrice(ctx context.Context) (*model.Go
 		if jsonErr == nil {
 			if setErr := r.rdb.SetEx(ctx, goldPriceCacheKey, data, goldPriceCacheTTL).Err(); setErr != nil {
 				// Gagal simpan cache = non-fatal, data tetap dikembalikan ke caller
-				log.Printf("[gold-repo] Redis SetEx error (non-fatal): %v", setErr)
+				slog.Warn("[gold-repo] Redis SetEx error (non-fatal)", "error", setErr)
 			}
 		}
 	}
@@ -327,6 +334,90 @@ func (r *postgresGoldRepository) BuyWithDebit(
 	// --- Langkah 5: Commit — semua langkah berhasil ---
 	if err = tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaksi pembelian emas gagal: %w", err)
+	}
+
+	return goldTx, nil
+}
+
+// SellWithCredit mengeksekusi penjualan emas dan mengkredit dana ke tabungan Wadiah secara ATOMIK.
+func (r *postgresGoldRepository) SellWithCredit(ctx context.Context, userID int64, accountID int64, gramAmount float64, pricePerGram float64, totalRupiah float64) (*model.GoldTransaction, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("memulai transaksi database untuk jual emas gagal: %w", err)
+	}
+	defer tx.Rollback()
+
+	// --- Langkah 1: Kunci dan validasi Rekening Wadiah ---
+	queryLock := `
+		SELECT user_id, status
+		FROM   savings_accounts
+		WHERE  id = $1
+		FOR UPDATE
+	`
+	var accUserID int64
+	var accStatus string
+
+	err = tx.QueryRowContext(ctx, queryLock, accountID).Scan(&accUserID, &accStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSavingsAccountNotFound
+		}
+		return nil, fmt.Errorf("query kunci rekening simpanan gagal: %w", err)
+	}
+
+	if accUserID != userID {
+		return nil, ErrSavingsAccountNotFound
+	}
+	if accStatus != "active" {
+		return nil, ErrAccountNotActive
+	}
+
+	// --- Langkah 2: Tambahkan saldo rupiah ke rekening ---
+	updateBalQuery := `
+		UPDATE savings_accounts
+		SET    balance = balance + $1,
+		       updated_at = NOW()
+		WHERE  id = $2
+	`
+	if _, err = tx.ExecContext(ctx, updateBalQuery, totalRupiah, accountID); err != nil {
+		return nil, fmt.Errorf("update penambahan saldo simpanan gagal: %w", err)
+	}
+
+	// --- Langkah 3: Catat histori gold_transaction (type=sell, status=success/pending) ---
+	insertGoldQuery := `
+		INSERT INTO gold_transactions (user_id, type, gram_amount, price_per_gram, total_rupiah, status)
+		VALUES ($1, 'sell', $2, $3, $4, 'success')
+		RETURNING id, created_at
+	`
+	goldTx := &model.GoldTransaction{
+		UserID:       userID,
+		Type:         "sell",
+		GramAmount:   gramAmount,
+		PricePerGram: pricePerGram,
+		TotalRupiah:  totalRupiah,
+		Status:       "success",
+	}
+
+	err = tx.QueryRowContext(ctx, insertGoldQuery,
+		userID, gramAmount, pricePerGram, totalRupiah,
+	).Scan(&goldTx.ID, &goldTx.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("insert transaksi jual emas gagal: %w", err)
+	}
+
+	// --- Langkah 4: Catat log transaksi (deposit dari penjualan emas) ---
+	referenceID := fmt.Sprintf("gold_sell_%d", goldTx.ID)
+	insertLogQuery := `
+		INSERT INTO savings_transactions (savings_account_id, type, amount, reference_id)
+		VALUES ($1, 'deposit', $2, $3)
+	`
+	if _, err = tx.ExecContext(ctx, insertLogQuery, accountID, totalRupiah, referenceID); err != nil {
+		return nil, fmt.Errorf("catat log deposit simpanan gagal: %w", err)
+	}
+
+	// --- Langkah 5: Commit ---
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaksi penjualan emas gagal: %w", err)
 	}
 
 	return goldTx, nil
@@ -552,8 +643,8 @@ func (r *postgresGoldRepository) RefundFailedTransaction(ctx context.Context, go
 	//   - 'processing' : transaksi sudah dikirim ke chain tapi EVM me-revert (receipt.Status=0).
 	// Status lain ('success', 'failed') berarti sudah final — skip untuk mencegah double-refund.
 	if currentStatus != "processing" && currentStatus != "pending" {
-		log.Printf("[gold-repo] RefundFailedTransaction: transaksi ID=%d status='%s' (sudah final), skip refund",
-			goldTxID, currentStatus)
+		slog.Info("RefundFailedTransaction: transaksi sudah final, skip refund",
+			"gold_tx_id", goldTxID, "status", currentStatus)
 		return nil
 	}
 
@@ -619,8 +710,10 @@ func (r *postgresGoldRepository) RefundFailedTransaction(ctx context.Context, go
 		return fmt.Errorf("commit refund transaksi ID=%d gagal: %w", goldTxID, err)
 	}
 
-	log.Printf("[gold-repo] ✓ refund berhasil — gold_tx ID=%d | akun=%d | +Rp%.2f",
-		goldTxID, savingsAccountID, totalRupiah)
+	slog.Info("refund berhasil",
+		"gold_tx_id", goldTxID,
+		"account_id", savingsAccountID,
+		"amount", totalRupiah)
 
 	return nil
 }

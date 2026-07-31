@@ -23,10 +23,10 @@ func NewHealthHandler(db *sql.DB) *HealthHandler {
 // healthResponse mendefinisikan struktur JSON yang dikembalikan oleh endpoint.
 // Tag `json` memastikan nama field konsisten di semua response.
 type healthResponse struct {
-	Status    string            `json:"status"`              // "ok" atau "degraded"
-	Timestamp string            `json:"timestamp"`           // waktu server saat request diterima
-	Services  map[string]string `json:"services"`            // status tiap dependency
-	Version   string            `json:"version,omitempty"`   // versi build (opsional)
+	Status    string            `json:"status"`            // "ok" atau "degraded"
+	Timestamp string            `json:"timestamp"`         // waktu server saat request diterima
+	Services  map[string]string `json:"services"`          // status tiap dependency
+	Version   string            `json:"version,omitempty"` // versi build (opsional)
 }
 
 // Check adalah handler untuk GET /api/v1/health.

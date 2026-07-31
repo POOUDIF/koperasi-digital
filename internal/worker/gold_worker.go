@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"math"
 	"math/big"
 	"strconv"
@@ -98,21 +99,21 @@ func NewGoldWorker(
 	// Validasi semua dependensi blockchain tersedia.
 	// Jika salah satu tidak ada, worker berjalan dalam mode log-only.
 	if evmClient == nil || ownerPrivateKey == "" || contractAddr == "" {
-		log.Println("[gold-worker] mode log-only — dependensi blockchain belum lengkap")
+		slog.Warn("[gold-worker] mode log-only — dependensi blockchain belum lengkap")
 		return w
 	}
 
 	// Parse alamat kontrak.
 	parsedAddr, err := blockchain.ParseContractAddress(contractAddr)
 	if err != nil {
-		log.Printf("[gold-worker] alamat kontrak tidak valid: %v — mode log-only", err)
+		slog.Error("alamat kontrak tidak valid", "error", err, "mode", "log-only")
 		return w
 	}
 
 	// Buat TransactOpts (Tx signer).
 	auth, err := evmClient.NewTransactOpts(ownerPrivateKey)
 	if err != nil {
-		log.Printf("[gold-worker] gagal membuat TransactOpts: %v — mode log-only", err)
+		slog.Error("gagal membuat TransactOpts", "error", err, "mode", "log-only")
 		return w
 	}
 
@@ -121,7 +122,7 @@ func NewGoldWorker(
 	w.contractAddress = parsedAddr
 	w.blockchainReady = true
 
-	log.Printf("[gold-worker] blockchain dikonfigurasi — kontrak: %s", parsedAddr.Hex())
+	slog.Info("[gold-worker] blockchain dikonfigurasi", "kontrak", parsedAddr.Hex())
 
 	return w
 }
@@ -138,9 +139,9 @@ func NewGoldWorker(
 // Tidak ada time.Ticker — zero polling, zero wasted CPU cycles.
 func (w *GoldWorker) Start(ctx context.Context) {
 	if w.blockchainReady {
-		log.Println("[gold-worker] dimulai — mode: event-driven (BLPop), blockchain: aktif")
+		slog.Info("[gold-worker] dimulai", "mode", "event-driven (BLPop)", "blockchain", "aktif")
 	} else {
-		log.Println("[gold-worker] dimulai — mode: event-driven (BLPop), blockchain: log-only")
+		slog.Info("[gold-worker] dimulai", "mode", "event-driven (BLPop)", "blockchain", "log-only")
 	}
 
 	for {
@@ -157,29 +158,29 @@ func (w *GoldWorker) Start(ctx context.Context) {
 			// Jika error disebabkan oleh context cancellation (ctx di-cancel saat
 			// shutdown), berhenti dengan bersih tanpa log error yang menakutkan.
 			if isContextError(err) {
-				log.Println("[gold-worker] menerima sinyal shutdown, berhenti.")
+				slog.Info("[gold-worker] menerima sinyal shutdown, berhenti.")
 				return
 			}
 			// Error jaringan Redis atau koneksi terputus — log dan coba lagi.
 			// Worker tidak berhenti agar bisa reconnect saat Redis kembali online.
-			log.Printf("[gold-worker] BLPop error: %v — mencoba kembali...", err)
+			slog.Warn("BLPop error", "error", err, "action", "mencoba kembali...")
 			continue
 		}
 
 		// Validasi format hasil BLPop (seharusnya selalu 2 elemen).
 		if len(result) < 2 {
-			log.Printf("[gold-worker] BLPop hasil tidak valid: %v", result)
+			slog.Warn("BLPop hasil tidak valid", "result", result)
 			continue
 		}
 
 		// Parse ID transaksi dari string ke int64.
 		txID, parseErr := strconv.ParseInt(result[1], 10, 64)
 		if parseErr != nil {
-			log.Printf("[gold-worker] gagal parse ID transaksi '%s': %v", result[1], parseErr)
+			slog.Error("gagal parse ID transaksi", "tx", result[1], "error", parseErr)
 			continue
 		}
 
-		log.Printf("[gold-worker] menerima ID transaksi dari queue: %d", txID)
+		slog.Info("menerima ID transaksi dari queue", "tx_id", txID)
 
 		// Proses transaksi dalam fungsi terpisah dengan recovery dari panic.
 		w.processTransaction(ctx, txID)
@@ -199,12 +200,12 @@ func (w *GoldWorker) Start(ctx context.Context) {
 // Panggil SEBELUM go goldWorker.Start(ctx) di main.go.
 // Berjalan secara sinkron — selesai sebelum Start() dipanggil.
 func (w *GoldWorker) Recover(ctx context.Context) {
-	log.Println("[gold-worker] memulai startup recovery...")
+	slog.Info("[gold-worker] memulai startup recovery...")
 
 	w.recoverPending(ctx)
 	w.recoverProcessing(ctx)
 
-	log.Println("[gold-worker] startup recovery selesai.")
+	slog.Info("[gold-worker] startup recovery selesai.")
 }
 
 // recoverPending mengambil semua transaksi 'pending' dari DB dan me-RPush

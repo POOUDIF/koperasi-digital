@@ -450,4 +450,3 @@ func (c *CoopGold) ParseGoldBurned(log types.Log) (*CoopGoldGoldBurned, error) {
 	event.Raw = log
 	return event, nil
 }
-
