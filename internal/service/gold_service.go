@@ -23,12 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 
 	"github.com/redis/go-redis/v9"
 
 	"koperasi-digital/internal/model"
 	"koperasi-digital/internal/repository"
+	"koperasi-digital/internal/util"
 )
 
 // goldMintQueueKey adalah Redis key untuk antrian ID transaksi emas yang
@@ -124,8 +124,9 @@ func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGo
 	//
 	// Pembulatan ke 4 desimal di sini agar angka yang kita kirim ke repository
 	// identik dengan yang akan tersimpan di DB (DECIMAL 19,4).
+	// Menggunakan helper terpadu agar tidak akumulasi floating point error.
 	rawTotal := req.GramAmount * price.BuyPricePerGram
-	totalRupiah := math.Round(rawTotal*10000) / 10000
+	totalRupiah := util.RoundTo4Decimals(rawTotal)
 
 	// --- Langkah 3 & 4: Validasi saldo + debit + insert gold_tx (satu DB transaction) ---
 	//

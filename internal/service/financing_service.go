@@ -13,11 +13,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"koperasi-digital/internal/model"
 	"koperasi-digital/internal/repository"
+	"koperasi-digital/internal/util"
 )
 
 // Sentinel errors modul pembiayaan.
@@ -45,8 +45,8 @@ var (
 	// ErrInsufficientBalance dikembalikan saat saldo rekening simpanan tidak cukup
 	// untuk melunasi nominal cicilan yang diminta.
 	ErrInsufficientBalance = errors.New("saldo rekening tidak mencukupi")
-
 )
+
 // Catatan: ErrSavingsAccountNotFound dan ErrAccountNotActive sudah dideklarasikan
 // di saving_service.go dalam package yang sama — tidak perlu didefinisikan ulang.
 
@@ -102,26 +102,45 @@ func NewFinancingService(financingRepo repository.FinancingRepository) Financing
 //  4. Bangun struct Financing dengan status "pending".
 //  5. Simpan ke database via repository.
 func (s *financingService) ApplyMurabahah(ctx context.Context, userID int64, req model.ApplyFinancingRequest) (*model.Financing, error) {
-	marginAmount := req.PrincipalAmount * murabahahMarginRate
-	totalPayable := req.PrincipalAmount + marginAmount
+	// Kita gunakan helper roundTo4Decimals agar tidak ada pergeseran presisi.
+	marginAmount := util.RoundTo4Decimals(req.PrincipalAmount * murabahahMarginRate)
+	totalPayable := util.RoundTo4Decimals(req.PrincipalAmount + marginAmount)
 
-	financing := &model.Financing{
-		FinancingNumber: fmt.Sprintf("FIN-MRB-%d", time.Now().UnixNano()),
-		UserID:          userID,
-		Akad:            "murabahah",
-		PrincipalAmount: req.PrincipalAmount,
-		MarginAmount:    marginAmount,
-		TotalPayable:    totalPayable,
-		DurationMonths:  req.DurationMonths,
-		Status:          "pending",
+	var saved *model.Financing
+	var err error
+
+	// GAP-05: Retry loop (maks 3 kali) untuk konflik FinancingNumber yang jarang (race condition).
+	maxAttempts := 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		financing := &model.Financing{
+			FinancingNumber: fmt.Sprintf("FIN-MRB-%d-%d", time.Now().UnixNano(), attempt),
+			UserID:          userID,
+			Akad:            "murabahah",
+			PrincipalAmount: req.PrincipalAmount,
+			MarginAmount:    marginAmount,
+			TotalPayable:    totalPayable,
+			DurationMonths:  req.DurationMonths,
+			Status:          "pending",
+		}
+
+		saved, err = s.financingRepo.CreateFinancing(ctx, financing)
+		if err != nil {
+			if errors.Is(err, repository.ErrDuplicateFinancingNumber) {
+				// Bila clash, loop lagi. Jika iterasi habis, return error ke user.
+				continue
+			}
+			return nil, fmt.Errorf("menyimpan pengajuan pembiayaan gagal: %w", err)
+		}
+		// Berhasil simpan.
+		break
 	}
 
-	saved, err := s.financingRepo.CreateFinancing(ctx, financing)
-	if err != nil {
+	if err != nil { // Masih ada error sisa dari percobaan terakhir
 		if errors.Is(err, repository.ErrDuplicateFinancingNumber) {
-			return nil, fmt.Errorf("terjadi konflik nomor pembiayaan, silakan coba lagi: %w", err)
+			return nil, fmt.Errorf("sistem sibuk membuat nomor pembiayaan, silakan coba lagi: %w", err)
 		}
-		return nil, fmt.Errorf("menyimpan pengajuan pembiayaan gagal: %w", err)
+		// Safe fallback.
+		return nil, fmt.Errorf("pengajuan pembiayaan gagal total: %w", err)
 	}
 
 	return saved, nil
@@ -223,17 +242,18 @@ func (s *financingService) handleApprove(ctx context.Context, f *model.Financing
 //     untuk memastikan total semua angsuran = total_payable persis.
 //
 // Contoh: total_payable = 16.500.000, duration = 12 bulan
-//   → per angsuran = 1.375.000,0000
-//   → angsuran 1–11 = 1.375.000,0000
-//   → angsuran 12   = 16.500.000 - (1.375.000 × 11) = 1.375.000,0000 (pas)
+//
+//	→ per angsuran = 1.375.000,0000
+//	→ angsuran 1–11 = 1.375.000,0000
+//	→ angsuran 12   = 16.500.000 - (1.375.000 × 11) = 1.375.000,0000 (pas)
 //
 // Tanggal jatuh tempo mulai 1 bulan dari sekarang (hari approval).
 func (s *financingService) generateInstallments(f *model.Financing) []model.FinancingInstallment {
 	n := f.DurationMonths
 
-	// Bulatkan ke 4 desimal menggunakan faktor 10^4 = 10000.
+	// Bulatkan ke 4 desimal menggunakan helper agar seragam.
 	rawPerInstallment := f.TotalPayable / float64(n)
-	perInstallment := math.Round(rawPerInstallment*10000) / 10000
+	perInstallment := util.RoundTo4Decimals(rawPerInstallment)
 
 	now := time.Now()
 	installments := make([]model.FinancingInstallment, n)
@@ -243,8 +263,8 @@ func (s *financingService) generateInstallments(f *model.Financing) []model.Fina
 
 		// Angsuran terakhir: sisa dari total agar tidak ada selisih pembulatan.
 		if i == n-1 {
-			paid := perInstallment * float64(n-1)
-			amount = math.Round((f.TotalPayable-paid)*10000) / 10000
+			paid := util.RoundTo4Decimals(perInstallment * float64(n-1))
+			amount = util.RoundTo4Decimals(f.TotalPayable - paid)
 		}
 
 		installments[i] = model.FinancingInstallment{

@@ -254,8 +254,9 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		v1.GET("/health", healthH.Check)
 
 		// Endpoint publik — tidak memerlukan JWT.
-		v1.POST("/register", userH.Register)
-		v1.POST("/login", userH.Login)
+		// Dilindungi oleh rate limiter agar tidak bisa dispam untuk eksploitasi brute-force/BOT.
+		v1.POST("/register", middleware.RateLimit(), userH.Register)
+		v1.POST("/login", middleware.RateLimit(), userH.Login)
 		v1.GET("/gold/price", goldH.GetPrice) // Harga emas publik
 
 		// Endpoint terproteksi — setiap route di grup ini wajib menyertakan

@@ -90,7 +90,8 @@ type BuyGoldRequest struct {
 	// GramAmount adalah berat emas yang ingin dibeli dalam satuan gram.
 	// Harus lebih dari 0. Tidak ada batas maksimum di level validasi Gin —
 	// batas bisnis (misalnya maks 100 gram/hari) bisa ditambahkan di service layer.
-	GramAmount float64 `json:"gram_amount" binding:"required,gt=0"`
+	// Batas minimum 0.0001 gram untuk mencegah presisi error dari float64.
+	GramAmount float64 `json:"gram_amount" binding:"required,min=0.0001"`
 
 	// SavingsAccountID adalah ID rekening simpanan Wadiah yang saldonya akan didebet.
 	// Rekening harus aktif dan milik user yang sedang login.
