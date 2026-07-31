@@ -117,6 +117,13 @@ func main() {
 	// Menggunakan connection pool yang sama (db) — tidak ada koneksi ekstra.
 	userRepo := repository.NewUserRepository(db)
 	goldWorker := worker.NewGoldWorker(goldRepo, userRepo, redisClient, evmClient, cfg.OwnerPrivateKey, cfg.GoldContractAddress)
+
+	// Recover dijalankan secara sinkron SEBELUM Start() agar transaksi yang
+	// terjebak akibat crash/restart sebelumnya langsung diproses:
+	//   - 'pending'    : di-requeue ke Redis → diproses oleh BLPop loop.
+	//   - 'processing' : awaitReceipt dilanjutkan dari tx_hash yang sudah tersimpan.
+	goldWorker.Recover(ctx)
+
 	go goldWorker.Start(ctx)
 
 	// --- 8. Jalankan server dengan graceful shutdown ---

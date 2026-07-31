@@ -77,6 +77,14 @@ type GoldRepository interface {
 	// tidak masuk ke queue (misalnya restart saat crash).
 	FindPending(ctx context.Context) ([]model.GoldTransaction, error)
 
+	// FindProcessing mengambil semua transaksi emas berstatus 'processing'
+	// yang memiliki tx_hash (sudah dikirim ke blockchain).
+	//
+	// Digunakan oleh Recover() saat startup — jika server crash saat goroutine
+	// awaitReceipt sedang menunggu konfirmasi blok, transaksi ini perlu
+	// di-resume agar bisa di-update ke 'success' atau di-refund jika revert.
+	FindProcessing(ctx context.Context) ([]model.GoldTransaction, error)
+
 	// UpdateStatusAndHash memperbarui status transaksi emas dan menyimpan tx_hash.
 	//
 	// Dipanggil oleh GoldWorker setelah transaksi berhasil dikirim ke blockchain:
@@ -389,6 +397,49 @@ func (r *postgresGoldRepository) FindPending(ctx context.Context) ([]model.GoldT
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterasi rows transaksi pending gagal: %w", err)
+	}
+
+	return txs, nil
+}
+
+// FindProcessing mengambil semua transaksi emas berstatus 'processing'
+// yang memiliki tx_hash (sudah dikirim ke blockchain tapi belum dikonfirmasi).
+//
+// Digunakan oleh GoldWorker.Recover() saat startup untuk meresume goroutine
+// awaitReceipt yang terbunuh akibat crash atau graceful shutdown di tengah jalan.
+//
+// Kondisi tx_hash IS NOT NULL memastikan kita hanya mengambil transaksi yang
+// benar-benar sudah on-chain — bukan yang gagal sebelum broadcast.
+func (r *postgresGoldRepository) FindProcessing(ctx context.Context) ([]model.GoldTransaction, error) {
+	query := `
+		SELECT id, user_id, type, gram_amount, price_per_gram,
+		       total_rupiah, tx_hash, status, created_at
+		FROM   gold_transactions
+		WHERE  status = 'processing'
+		  AND  tx_hash IS NOT NULL
+		ORDER  BY created_at ASC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query transaksi processing gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var txs []model.GoldTransaction
+	for rows.Next() {
+		var t model.GoldTransaction
+		if err := rows.Scan(
+			&t.ID, &t.UserID, &t.Type, &t.GramAmount, &t.PricePerGram,
+			&t.TotalRupiah, &t.TxHash, &t.Status, &t.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaksi processing gagal: %w", err)
+		}
+		txs = append(txs, t)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi rows transaksi processing gagal: %w", err)
 	}
 
 	return txs, nil

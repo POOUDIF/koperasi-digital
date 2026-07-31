@@ -186,6 +186,112 @@ func (w *GoldWorker) Start(ctx context.Context) {
 	}
 }
 
+// Recover menjalankan startup recovery untuk dua jenis transaksi yang terjebak:
+//
+//  1. Status 'pending' — transaksi sudah tersimpan di DB tapi belum sempat masuk
+//     ke Redis queue karena server crash sebelum/saat RPush:
+//     → RPush ulang ke "queue:gold_mint" agar BLPop loop memprosesnya.
+//
+//  2. Status 'processing' dengan tx_hash — transaksi sudah dikirim ke blockchain
+//     tapi goroutine awaitReceipt terbunuh saat server shutdown/crash:
+//     → Ambil transaksi dari chain via tx_hash → launch awaitReceipt ulang.
+//
+// Panggil SEBELUM go goldWorker.Start(ctx) di main.go.
+// Berjalan secara sinkron — selesai sebelum Start() dipanggil.
+func (w *GoldWorker) Recover(ctx context.Context) {
+	log.Println("[gold-worker] memulai startup recovery...")
+
+	w.recoverPending(ctx)
+	w.recoverProcessing(ctx)
+
+	log.Println("[gold-worker] startup recovery selesai.")
+}
+
+// recoverPending mengambil semua transaksi 'pending' dari DB dan me-RPush
+// ID-nya ke Redis queue agar BLPop loop segera memprosesnya.
+//
+// Idempoten: jika ID sudah ada di queue (redundant push), worker akan skip
+// via guard "status != pending" di processTransaction.
+func (w *GoldWorker) recoverPending(ctx context.Context) {
+	pendingTxs, err := w.goldRepo.FindPending(ctx)
+	if err != nil {
+		log.Printf("[gold-worker] recovery: gagal query transaksi pending: %v", err)
+		return
+	}
+
+	if len(pendingTxs) == 0 {
+		log.Println("[gold-worker] recovery: tidak ada transaksi pending.")
+		return
+	}
+
+	log.Printf("[gold-worker] recovery: menemukan %d transaksi pending, me-requeue...", len(pendingTxs))
+
+	for _, tx := range pendingTxs {
+		if pushErr := w.rdb.RPush(ctx, goldMintQueueKey, tx.ID).Err(); pushErr != nil {
+			log.Printf("[gold-worker] recovery: gagal requeue transaksi ID=%d: %v", tx.ID, pushErr)
+			continue
+		}
+		log.Printf("[gold-worker] recovery: transaksi ID=%d di-requeue ke '%s'", tx.ID, goldMintQueueKey)
+	}
+}
+
+// recoverProcessing mengambil semua transaksi 'processing' dari DB,
+// mengambil objek transaksi dari blockchain via tx_hash, lalu melanjutkan
+// goroutine awaitReceipt yang terbunuh saat server sebelumnya mati.
+//
+// Jika blockchain tidak tersedia (evmClient nil atau blockchainReady false),
+// recovery ini dilewati — transaksi tetap 'processing' sampai operator
+// melakukan intervensi manual.
+func (w *GoldWorker) recoverProcessing(ctx context.Context) {
+	if !w.blockchainReady {
+		log.Println("[gold-worker] recovery: blockchain tidak aktif — skip recovery transaksi processing")
+		return
+	}
+
+	processingTxs, err := w.goldRepo.FindProcessing(ctx)
+	if err != nil {
+		log.Printf("[gold-worker] recovery: gagal query transaksi processing: %v", err)
+		return
+	}
+
+	if len(processingTxs) == 0 {
+		log.Println("[gold-worker] recovery: tidak ada transaksi processing.")
+		return
+	}
+
+	log.Printf("[gold-worker] recovery: menemukan %d transaksi processing, melanjutkan awaitReceipt...", len(processingTxs))
+
+	for _, tx := range processingTxs {
+		if tx.TxHash == nil || *tx.TxHash == "" {
+			log.Printf("[gold-worker] recovery: transaksi ID=%d tidak memiliki tx_hash, dilewati", tx.ID)
+			continue
+		}
+
+		txHash := common.HexToHash(*tx.TxHash)
+
+		// Ambil objek transaksi dari blockchain menggunakan tx_hash yang tersimpan di DB.
+		chainTx, _, err := w.evmClient.Underlying().TransactionByHash(ctx, txHash)
+		if err != nil {
+			log.Printf("[gold-worker] recovery: gagal ambil tx dari chain untuk ID=%d (hash=%s): %v",
+				tx.ID, *tx.TxHash, err)
+			continue
+		}
+
+		// Buat binding kontrak untuk resume awaitReceipt.
+		coopGold, err := contract.NewCoopGold(w.contractAddress, w.evmClient.Underlying())
+		if err != nil {
+			log.Printf("[gold-worker] recovery: gagal buat binding kontrak untuk ID=%d: %v", tx.ID, err)
+			continue
+		}
+
+		log.Printf("[gold-worker] recovery: resume awaitReceipt untuk ID=%d (hash=%s)", tx.ID, *tx.TxHash)
+
+		// Capture tx.ID untuk goroutine closure.
+		goldTxID := tx.ID
+		go w.awaitReceipt(ctx, goldTxID, coopGold, chainTx)
+	}
+}
+
 // processTransaction mengambil dan memproses satu transaksi emas berdasarkan ID.
 //
 // Dipisahkan dari Start() agar:
