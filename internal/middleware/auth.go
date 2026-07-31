@@ -2,6 +2,7 @@
 package middleware
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
@@ -80,6 +81,81 @@ func RequireAuth(jwtSecret string) gin.HandlerFunc {
 		c.Set(ContextKeyEmail, claims.Email)
 
 		// Lanjutkan ke handler berikutnya dalam chain.
+		c.Next()
+	}
+}
+
+// RequireActiveUserDB mengembalikan Gin HandlerFunc yang memverifikasi bahwa akun user
+// masih berstatus 'active' di database pada setiap request.
+//
+// HARUS dirantai SETELAH RequireAuth karena bergantung pada ContextKeyUserID
+// yang sudah disematkan RequireAuth ke Gin context.
+//
+// Mengapa perlu middleware ini jika Login sudah cek status?
+//   - JWT bersifat stateless: setelah diterbitkan, token tetap valid sampai expired.
+//   - Jika admin men-suspend user SETELAH token diterbitkan, user masih bisa
+//     mengakses semua endpoint protected menggunakan token lama.
+//   - Middleware ini memastikan perubahan status berlaku segera pada request berikutnya,
+//     tanpa harus menunggu token expired.
+//
+// Trade-off: satu extra DB query ringan (SELECT satu kolom) per request.
+// Pattern ini identik dengan RequireRole yang sudah ada dan sudah terbukti acceptable.
+//
+// Contoh penggunaan di router:
+//
+//	protected := v1.Group("",
+//	    middleware.RequireAuth(cfg.JWTSecret),
+//	    middleware.RequireActiveUserDB(db),
+//	)
+func RequireActiveUserDB(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Ambil user_id dari context yang sudah diisi RequireAuth.
+		// Jika tidak ada, berarti middleware dipakai tanpa RequireAuth — konfigurasi salah.
+		rawID, exists := c.Get(ContextKeyUserID)
+		if !exists {
+			abortUnauthorized(c, "sesi tidak valid, silakan login kembali")
+			return
+		}
+
+		userID, ok := rawID.(int64)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+				"error": "terjadi kesalahan pada server",
+			})
+			return
+		}
+
+		// Query kolom status dari database.
+		// Hanya SELECT satu kolom — query ini sangat ringan.
+		var status string
+		err := db.QueryRowContext(
+			c.Request.Context(),
+			`SELECT status FROM users WHERE id = $1 LIMIT 1`,
+			userID,
+		).Scan(&status)
+
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Token valid tapi user sudah dihapus dari database.
+				abortUnauthorized(c, "akun tidak ditemukan, silakan login kembali")
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+				"error": "terjadi kesalahan pada server",
+			})
+			return
+		}
+
+		// Hanya status 'active' yang diizinkan mengakses endpoint protected.
+		// 'inactive' dan 'banned' dikembalikan 403 Forbidden agar client tahu
+		// ini bukan masalah token, melainkan kebijakan akun.
+		if status != "active" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "akun tidak aktif atau diblokir, hubungi admin koperasi",
+			})
+			return
+		}
+
 		c.Next()
 	}
 }

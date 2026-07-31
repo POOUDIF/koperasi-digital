@@ -2,7 +2,7 @@
 //
 // Layer ini berada di antara handler (HTTP) dan repository (database):
 //
-//   Handler → Service → Repository → Database
+//	Handler → Service → Repository → Database
 //
 // Service tidak boleh tahu apapun tentang HTTP (gin.Context, status code, dsb.)
 // maupun tentang detail SQL. Tugasnya murni: orkestrasi aturan bisnis.
@@ -27,6 +27,12 @@ var (
 	ErrInvalidCredentials = errors.New("email atau password salah")
 	ErrEmailAlreadyExists = errors.New("email sudah terdaftar")
 	ErrUserNotFound       = errors.New("user tidak ditemukan")
+
+	// ErrAccountSuspended dikembalikan saat user mencoba login dengan akun
+	// yang berstatus 'inactive' atau 'banned'.
+	// Dibedakan dari ErrInvalidCredentials agar client bisa menampilkan pesan yang sesuai,
+	// namun tetap tidak mengungkap apakah email terdaftar atau tidak (dicek setelah auth berhasil).
+	ErrAccountSuspended = errors.New("akun tidak aktif atau diblokir, hubungi admin koperasi")
 )
 
 // jwtClaims mendefinisikan payload yang disematkan di dalam token JWT.
@@ -152,7 +158,16 @@ func (s *userService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, ErrInvalidCredentials
 	}
 
-	// Langkah 3: Generate JWT.
+	// Langkah 3: Validasi status akun.
+	// Pemeriksaan ini dilakukan SETELAH verifikasi password berhasil.
+	// Mengapa setelah? Agar waktu respons untuk email-tidak-ada, password-salah,
+	// dan akun-suspended tidak bisa dibedakan dari sisi waktu (timing attack).
+	// Akun harus berstatus 'active' — 'inactive' dan 'banned' tidak diizinkan login.
+	if user.Status != "active" {
+		return nil, ErrAccountSuspended
+	}
+
+	// Langkah 4: Generate JWT.
 	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, fmt.Errorf("generate token gagal: %w", err)
@@ -179,6 +194,12 @@ func (s *userService) GetProfile(ctx context.Context, userID int64) (*model.User
 			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("mengambil profil user gagal: %w", err)
+	}
+
+	// Validasi status: jika akun di-suspend setelah token diterbitkan,
+	// kembalikan error agar client tahu sesi sudah tidak valid.
+	if user.Status != "active" {
+		return nil, ErrAccountSuspended
 	}
 
 	return user, nil

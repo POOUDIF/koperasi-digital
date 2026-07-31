@@ -106,6 +106,12 @@ func (h *UserHandler) Login(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, errorResponse{Error: "email atau password tidak valid"})
 			return
 		}
+		if errors.Is(err, service.ErrAccountSuspended) {
+			// 403 Forbidden — kredensial valid tapi akun dinonaktifkan/diblokir admin.
+			// Berbeda dari 401: client tahu ini bukan masalah password, tapi kebijakan akun.
+			c.JSON(http.StatusForbidden, errorResponse{Error: err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan pada server"})
 		return
 	}
@@ -152,6 +158,12 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, service.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, errorResponse{Error: "akun tidak ditemukan"})
+			return
+		}
+		if errors.Is(err, service.ErrAccountSuspended) {
+			// 403 Forbidden — akun di-suspend setelah token diterbitkan.
+			// Client sebaiknya menghapus token lokal dan menampilkan pesan ke user.
+			c.JSON(http.StatusForbidden, errorResponse{Error: err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan pada server"})

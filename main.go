@@ -252,10 +252,17 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		v1.GET("/gold/price", goldH.GetPrice) // Harga emas publik
 
 		// Endpoint terproteksi — setiap route di grup ini wajib menyertakan
-		// header "Authorization: Bearer <token>" yang valid.
-		// middleware.RequireAuth memverifikasi token, lalu menyematkan user_id
-		// dan email ke Gin context sebelum handler dijalankan.
-		protected := v1.Group("", middleware.RequireAuth(cfg.JWTSecret))
+		// header "Authorization: Bearer <token>" yang valid, dan akun user
+		// harus berstatus 'active'.
+		//
+		// Dua middleware dirantai:
+		//  1. RequireAuth        : validasi JWT (signature + expiry).
+		//  2. RequireActiveUserDB: cek status akun dari DB — memastikan akun yang
+		//     di-suspend SETELAH token diterbitkan langsung diblokir pada request berikutnya.
+		protected := v1.Group("",
+			middleware.RequireAuth(cfg.JWTSecret),
+			middleware.RequireActiveUserDB(db),
+		)
 		{
 			protected.GET("/profile", userH.GetProfile)
 
