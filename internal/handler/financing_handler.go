@@ -1,15 +1,5 @@
 // Package handler — HTTP handler untuk modul Pembiayaan Syariah.
-//
 // Tanggung jawab FinancingHandler:
-//  1. Ekstrak user_id dari Gin context (diisi middleware JWT).
-//  2. Baca & validasi request body JSON.
-//  3. Delegasikan ke FinancingService.
-//  4. Terjemahkan hasil/error menjadi HTTP response yang tepat.
-//
-// Catatan package-level: errorResponse dan extractUserID tidak didefinisikan
-// ulang di sini karena sudah ada di user_handler.go dan saving_handler.go
-// dalam package yang sama (package handler). Go mengizinkan penggunaan
-// identifier yang dideklarasikan di file lain dalam satu package.
 package handler
 
 import (
@@ -35,37 +25,7 @@ func NewFinancingHandler(financingService service.FinancingService) *FinancingHa
 }
 
 // Apply menangani POST /api/v1/financing/apply.
-//
 // Endpoint ini dilindungi middleware JWT. Anggota mengirimkan nominal pembiayaan
-// dan tenor; sistem menghitung margin, total, generate nomor unik, lalu menyimpan
-// pengajuan dengan status "pending" untuk diproses admin/komite.
-//
-// Request body (JSON):
-//
-//	{
-//	  "principal_amount": 15000000,
-//	  "duration_months": 12
-//	}
-//
-// Response sukses (201 Created):
-//
-//	{
-//	  "id": 1,
-//	  "financing_number": "FIN-MRB-1713261234567890",
-//	  "user_id": 42,
-//	  "akad": "murabahah",
-//	  "principal_amount": 15000000,
-//	  "margin_amount": 1500000,
-//	  "total_payable": 16500000,
-//	  "duration_months": 12,
-//	  "status": "pending",
-//	  "created_at": "2024-04-16T10:30:00Z"
-//	}
-//
-// Response gagal:
-//   - 400 Bad Request  : body tidak valid / field wajib kosong / nilai di luar batas
-//   - 401 Unauthorized : token JWT tidak ada atau tidak valid
-//   - 500 Internal     : error tak terduga di server
 func (h *FinancingHandler) Apply(c *gin.Context) {
 	// Ambil user_id dari Gin context yang sudah diisi oleh middleware.RequireAuth.
 	// extractUserID didefinisikan di saving_handler.go dalam package yang sama.
@@ -87,8 +47,6 @@ func (h *FinancingHandler) Apply(c *gin.Context) {
 	if err != nil {
 		// Semua error dari service layer (termasuk DB error) diperlakukan sebagai
 		// 500 karena tidak ada error bisnis khusus di endpoint ini yang perlu
-		// diterjemahkan ke status code berbeda.
-		// Jangan kirim detail error internal ke client.
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan pada server"})
 		return
 	}
@@ -98,17 +56,7 @@ func (h *FinancingHandler) Apply(c *gin.Context) {
 }
 
 // GetMyFinancings menangani GET /api/v1/financing.
-//
 // Mengembalikan semua pengajuan pembiayaan milik user yang sedang login,
-// termasuk status terkini dari setiap pengajuan.
-//
-// Response sukses (200 OK):
-//
-//	{ "financings": [ { "id": 1, "financing_number": "FIN-MRB-...", ... } ] }
-//
-// Response gagal:
-//   - 401 Unauthorized : token JWT tidak ada atau tidak valid
-//   - 500 Internal     : error tak terduga di server
 func (h *FinancingHandler) GetMyFinancings(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {
@@ -126,39 +74,7 @@ func (h *FinancingHandler) GetMyFinancings(c *gin.Context) {
 }
 
 // Review menangani PUT /api/v1/admin/financing/:id/review.
-//
 // Endpoint ini dilindungi oleh dua middleware yang dirangkai:
-//   - RequireAuth   : memastikan request membawa JWT yang valid.
-//   - RequireRole   : memastikan user memiliki role admin/pengurus/super_admin.
-//
-// Admin mengirimkan keputusan "approve" atau "reject".
-// Jika approve, sistem secara otomatis menghasilkan jadwal angsuran bulanan.
-//
-// URL param:
-//   - :id — primary key pengajuan yang akan direview
-//
-// Request body (JSON):
-//
-//	{ "action": "approve" }   atau   { "action": "reject" }
-//
-// Response sukses (200 OK) — data financing dengan status terbaru:
-//
-//	{
-//	  "id": 1,
-//	  "financing_number": "FIN-MRB-...",
-//	  "status": "approved",
-//	  "reviewed_by": 99,
-//	  "reviewed_at": "2024-04-16T10:30:00Z",
-//	  ...
-//	}
-//
-// Response gagal:
-//   - 400 Bad Request         : body tidak valid / :id bukan angka
-//   - 401 Unauthorized        : token JWT tidak ada atau tidak valid
-//   - 403 Forbidden           : role tidak mencukupi (bukan admin/pengurus/super_admin)
-//   - 404 Not Found           : pengajuan dengan id tersebut tidak ditemukan
-//   - 409 Conflict            : pengajuan sudah pernah diproses (bukan 'pending')
-//   - 500 Internal            : error tak terduga di server
 func (h *FinancingHandler) Review(c *gin.Context) {
 	// Ambil admin_id dari Gin context — diisi oleh RequireAuth.
 	adminID, ok := extractUserID(c)
@@ -202,22 +118,7 @@ func (h *FinancingHandler) Review(c *gin.Context) {
 }
 
 // GetInstallments menangani GET /api/v1/financing/:id/installments.
-//
 // Mengembalikan daftar jadwal cicilan untuk satu pengajuan pembiayaan milik user.
-// Endpoint dilindungi middleware JWT; hanya pemilik pengajuan yang bisa mengaksesnya.
-//
-// URL param:
-//   - :id — primary key pengajuan (financing_id)
-//
-// Response sukses (200 OK):
-//
-//	{ "installments": [ { "id": 1, "installment_number": 1, "amount_due": 1375000, ... } ] }
-//
-// Response gagal:
-//   - 400 Bad Request  : :id bukan angka valid
-//   - 401 Unauthorized : token JWT tidak ada atau tidak valid
-//   - 404 Not Found    : pengajuan tidak ada atau bukan milik user ini
-//   - 500 Internal     : error tak terduga di server
 func (h *FinancingHandler) GetInstallments(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {
@@ -247,29 +148,7 @@ func (h *FinancingHandler) GetInstallments(c *gin.Context) {
 }
 
 // PayInstallment menangani POST /api/v1/financing/installments/:id/pay.
-//
 // Anggota membayar satu cicilan dengan mendebet saldo rekening simpanannya.
-// Seluruh operasi (debit saldo, log transaksi, update cicilan, cek pelunasan penuh)
-// dijalankan secara atomik — tidak ada state parsial jika terjadi kegagalan.
-//
-// URL param:
-//   - :id — primary key cicilan yang akan dibayar
-//
-// Request body (JSON):
-//
-//	{ "savings_account_id": 3 }
-//
-// Response sukses (200 OK):
-//
-//	{ "message": "pembayaran cicilan berhasil" }
-//
-// Response gagal:
-//   - 400 Bad Request            : :id bukan angka / body tidak valid
-//   - 401 Unauthorized           : token JWT tidak ada atau tidak valid
-//   - 404 Not Found              : cicilan atau rekening tidak ditemukan
-//   - 409 Conflict               : cicilan sudah dibayar sebelumnya
-//   - 422 Unprocessable Entity   : saldo tidak cukup / rekening tidak aktif
-//   - 500 Internal               : error tak terduga di server
 func (h *FinancingHandler) PayInstallment(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {

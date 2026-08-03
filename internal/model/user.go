@@ -5,9 +5,7 @@ package model
 import "time"
 
 // User merepresentasikan anggota koperasi yang terdaftar di sistem.
-//
 // Tag `db` dipakai oleh query manual (lib/pq) untuk mapping kolom.
-// Tag `json:"-"` pada PasswordHash memastikan hash TIDAK PERNAH bocor ke response API.
 type User struct {
 	ID           int64  `db:"id"            json:"id"`
 	NamaLengkap  string `db:"nama_lengkap"  json:"nama_lengkap"`
@@ -16,19 +14,14 @@ type User struct {
 
 	// Role menentukan hak akses user di sistem RBAC.
 	// Nilai: "anggota" | "pengurus" | "admin" | "super_admin"
-	// Default di database: "anggota"
 	Role string `db:"role" json:"role"`
 
 	// WalletAddress adalah alamat wallet Polygon (EVM) milik anggota.
 	// NULL jika anggota belum menghubungkan wallet mereka.
-	// Diisi saat anggota klik "Connect Wallet" di frontend (ethers.js).
-	// Format: "0x" + 40 karakter hex, contoh: "0xAbCd...1234".
 	WalletAddress *string `db:"wallet_address" json:"wallet_address,omitempty"`
 
 	// Status menentukan kondisi akun:
-	//   active   : bisa login dan melakukan semua transaksi.
-	//   inactive : akun belum diaktivasi atau dinonaktifkan sementara.
-	//   banned   : diblokir permanen oleh admin/pengurus.
+	// active   : bisa login dan melakukan semua transaksi.
 	Status string `db:"status" json:"status"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`

@@ -1,12 +1,5 @@
 // Package service — logika bisnis modul simpanan syariah.
-//
 // Layer ini berada di antara handler dan repository:
-//
-//	Handler → SavingService → SavingRepository → Database
-//
-// SavingService tidak tahu tentang HTTP (gin.Context, status code).
-// SavingRepository tidak tahu tentang aturan bisnis (min_deposit, authorization).
-// Pembagian tanggung jawab ini membuat setiap layer mudah ditest secara terpisah.
 package service
 
 import (
@@ -22,7 +15,6 @@ import (
 var (
 	// ErrSavingsAccountNotFound dikembalikan saat rekening tidak ditemukan
 	// atau saat user mencoba mengakses rekening milik orang lain (authorization).
-	// Sengaja sama dengan "not found" untuk mencegah enumerasi rekening.
 	ErrSavingsAccountNotFound = errors.New("rekening simpanan tidak ditemukan")
 
 	// ErrSavingsProductNotFound dikembalikan saat ID produk tidak valid.
@@ -63,13 +55,7 @@ func NewSavingService(savingRepo repository.SavingRepository) SavingService {
 }
 
 // OpenAccount membuka rekening simpanan baru untuk anggota.
-//
 // Aturan bisnis:
-//  1. Produk simpanan yang dipilih harus ada di database.
-//  2. Rekening dibuka dengan saldo awal 0 dan status 'active'.
-//
-// Catatan: aturan "satu anggota satu rekening per produk" bisa ditambahkan
-// di sini di masa depan dengan query COUNT sebelum CreateAccount dipanggil.
 func (s *savingService) OpenAccount(ctx context.Context, userID int64, req model.OpenAccountRequest) (*model.SavingsAccount, error) {
 	// Validasi: pastikan produk simpanan yang dipilih ada.
 	// Kita tidak perlu data produknya sekarang, cukup pastikan ia eksis.
@@ -106,18 +92,7 @@ func (s *savingService) GetAccounts(ctx context.Context, userID int64) ([]model.
 }
 
 // DepositFund memproses setoran dana ke rekening simpanan.
-//
 // Aturan bisnis yang divalidasi (secara berurutan):
-//  1. Rekening harus ada dan milik user yang sedang login.
-//     (Jika rekening ada tapi milik orang lain → kembalikan "not found",
-//     bukan "forbidden" — mencegah enumerasi ID rekening orang lain.)
-//  2. Nominal setoran harus >= min_deposit produk simpanan.
-//  3. Rekening harus berstatus 'active'.
-//     (Langkah 3 divalidasi di repository layer saat FOR UPDATE, bukan di sini,
-//     agar validasi terjadi pada data yang sudah dikunci dan paling terkini.)
-//
-// Eksekusi UPDATE balance + INSERT log transaksi dilimpahkan ke repository.Deposit()
-// yang menjalankan keduanya dalam satu database transaction atomik.
 func (s *savingService) DepositFund(ctx context.Context, userID int64, req model.DepositRequest) error {
 	// --- Langkah 1: Ambil rekening & validasi kepemilikan ---
 	account, err := s.savingRepo.GetAccountByID(ctx, req.AccountID)
@@ -130,7 +105,6 @@ func (s *savingService) DepositFund(ctx context.Context, userID int64, req model
 
 	// Authorization check: rekening harus milik user yang sedang melakukan request.
 	// Kembalikan ErrSavingsAccountNotFound (bukan error "akses ditolak") agar
-	// penyerang tidak bisa memastikan apakah sebuah ID rekening valid atau tidak.
 	if account.UserID != userID {
 		return ErrSavingsAccountNotFound
 	}
@@ -151,7 +125,6 @@ func (s *savingService) DepositFund(ctx context.Context, userID int64, req model
 
 	// --- Langkah 3: Eksekusi setoran secara atomik ---
 	// Semua operasi database (lock, update balance, insert log) terjadi di dalam
-	// satu database transaction di repository layer. Service tidak tahu detail tx.
 	if err := s.savingRepo.Deposit(ctx, req.AccountID, req.Amount, req.ReferenceID); err != nil {
 		if errors.Is(err, repository.ErrAccountNotActive) {
 			return ErrAccountNotActive

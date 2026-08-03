@@ -30,14 +30,7 @@ type healthResponse struct {
 }
 
 // Check adalah handler untuk GET /api/v1/health.
-//
 // Endpoint ini melakukan:
-//  1. Ping ke database untuk memverifikasi koneksi masih hidup.
-//  2. Mengembalikan HTTP 200 jika semua dependency sehat.
-//  3. Mengembalikan HTTP 503 jika ada dependency yang bermasalah.
-//
-// Endpoint ini umumnya dipanggil oleh load-balancer atau orchestrator (Kubernetes liveness probe)
-// untuk memutuskan apakah instance ini layak menerima traffic.
 func (h *HealthHandler) Check(c *gin.Context) {
 	services := make(map[string]string)
 	overallStatus := "ok"
@@ -45,7 +38,6 @@ func (h *HealthHandler) Check(c *gin.Context) {
 
 	// --- Cek koneksi database ---
 	// db.PingContext mengirim perintah ringan ke database. Jika gagal, koneksi putus
-	// atau database sedang down.
 	if err := h.db.PingContext(c.Request.Context()); err != nil {
 		services["database"] = "unreachable: " + err.Error()
 		overallStatus = "degraded"
@@ -56,11 +48,6 @@ func (h *HealthHandler) Check(c *gin.Context) {
 
 	// Tambahkan pengecekan service lain di sini (Redis, external API, dsb.)
 	// Contoh:
-	// if err := h.redis.Ping(c.Request.Context()); err != nil {
-	//     services["redis"] = "unreachable"
-	//     overallStatus = "degraded"
-	//     httpStatus = http.StatusServiceUnavailable
-	// }
 
 	c.JSON(httpStatus, healthResponse{
 		Status:    overallStatus,

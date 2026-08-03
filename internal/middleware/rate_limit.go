@@ -19,7 +19,6 @@ type IPRateLimiter struct {
 
 // NewIPRateLimiter membuat rate limiter di mana:
 // 'r' adalah seberapa banyak request per detik yang diizinkan (misal: 3 = 3 permintaan per detik).
-// 'b' adalah burst capacity (berapa banyak total yang boleh diproses secara bersamaan di puncak seketika).
 func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter {
 	return &IPRateLimiter{
 		ips: make(map[string]*rate.Limiter),

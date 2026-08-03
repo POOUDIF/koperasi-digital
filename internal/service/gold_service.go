@@ -1,21 +1,5 @@
 // Package service — logika bisnis modul Jual Beli Emas Digital.
-//
 // Posisi dalam arsitektur:
-//
-//	Handler → GoldService → GoldRepository → Redis (cache)
-//	                                       → Database
-//	        → GoldService → Redis (message queue: queue:gold_mint)
-//	                ↓
-//	           GoldWorker (consume via BLPop)
-//
-// GoldService tidak tahu tentang HTTP (gin.Context, status code).
-// GoldRepository tidak tahu tentang aturan bisnis (validasi gram, otorisasi user).
-//
-// Arsitektur Event-Driven:
-// Setelah BuyGold berhasil commit ke PostgreSQL (status: 'pending'),
-// GoldService melakukan RPush ID transaksi ke "queue:gold_mint" di Redis.
-// GoldWorker yang sedang BLPop akan langsung terbangun dan memproses transaksi
-// tanpa perlu menunggu tick berikutnya (tidak ada polling lagi).
 package service
 
 import (
@@ -33,7 +17,6 @@ import (
 
 // goldMintQueueKey adalah Redis key untuk antrian ID transaksi emas yang
 // menunggu diproses (di-mint) oleh GoldWorker.
-// Worker melakukan BLPop pada key ini; Service melakukan RPush setelah buy.
 const goldMintQueueKey = "queue:gold_mint"
 
 // ErrGoldPriceNotAvailable dikembalikan saat tidak ada data harga emas di sistem.
@@ -50,19 +33,7 @@ type GoldService interface {
 	GetCurrentPrice(ctx context.Context) (*model.GoldPrice, error)
 
 	// BuyGold memproses pembelian emas oleh anggota.
-	//
 	// Langkah-langkah yang dijalankan:
-	//  1. Ambil harga emas terbaru (dari Redis cache atau PostgreSQL).
-	//  2. Hitung total_rupiah = gramAmount × buy_price_per_gram (dibulatkan 4 desimal).
-	//  3. Validasi & debit rekening simpanan Wadiah user sebesar total_rupiah (atomik di DB).
-	//  4. Catat transaksi emas dengan status 'pending'.
-	//  5. Push ID transaksi ke Redis queue "queue:gold_mint" → worker langsung memproses.
-	//
-	// Error yang mungkin dikembalikan:
-	//   ErrGoldPriceNotAvailable — belum ada data harga.
-	//   ErrSavingsAccountNotFound — rekening tidak ada atau bukan milik user.
-	//   ErrAccountNotActive       — rekening dibekukan/ditutup.
-	//   ErrInsufficientBalance    — saldo tidak cukup untuk membeli sejumlah gram itu.
 	BuyGold(ctx context.Context, userID int64, req model.BuyGoldRequest) (*model.GoldTransaction, error)
 
 	// SellGold memproses penjualan emas oleh anggota.
@@ -76,12 +47,7 @@ type goldService struct {
 }
 
 // NewGoldService membuat instance service dengan dependency diinject.
-//
 // Parameter:
-//   - goldRepo : repository untuk operasi database emas (wajib).
-//   - rdb      : Redis client untuk message queue (boleh nil — RPush dilewati).
-//
-// Menerima interface (bukan *postgresGoldRepository) agar mudah di-mock saat testing.
 func NewGoldService(goldRepo repository.GoldRepository, rdb *redis.Client) GoldService {
 	return &goldService{goldRepo: goldRepo, rdb: rdb}
 }
@@ -100,18 +66,7 @@ func (s *goldService) GetCurrentPrice(ctx context.Context) (*model.GoldPrice, er
 }
 
 // BuyGold memproses pembelian emas oleh anggota.
-//
 // Perhitungan total_rupiah dibulatkan ke 4 desimal menggunakan math.Round agar:
-//   - Konsisten dengan kolom DECIMAL(19,4) di database.
-//   - Tidak ada selisih antara nilai yang didebet dan yang dicatat di gold_transactions.
-//
-// Seluruh operasi database (validasi saldo, debit, log, insert gold_tx) diserahkan
-// ke repository layer yang menjalankannya dalam satu DB transaction atomik.
-//
-// Sesudah DB transaction berhasil commit, ID transaksi di-push ke Redis queue
-// sehingga GoldWorker langsung terbangun dan memproses tanpa menunggu polling.
-// Jika RPush gagal (Redis down), hanya di-log — DB transaction TIDAK di-rollback.
-// Transaksi tetap 'pending' di DB dan bisa diproses oleh mekanisme recovery.
 func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGoldRequest) (*model.GoldTransaction, error) {
 	// GAP-09: Maksimal transaksi 100 Gram.
 	if req.GramAmount > 100 {
@@ -129,20 +84,12 @@ func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGo
 	}
 
 	// --- Langkah 2: Hitung total yang harus dibayar ---
-	//
 	// Untuk transaksi beli, kita pakai buy_price_per_gram (harga yang lebih tinggi,
-	// sudah termasuk spread koperasi).
-	//
-	// Pembulatan ke 4 desimal di sini agar angka yang kita kirim ke repository
-	// identik dengan yang akan tersimpan di DB (DECIMAL 19,4).
-	// Menggunakan helper terpadu agar tidak akumulasi floating point error.
 	rawTotal := req.GramAmount * price.BuyPricePerGram
 	totalRupiah := util.RoundTo4Decimals(rawTotal)
 
 	// --- Langkah 3 & 4: Validasi saldo + debit + insert gold_tx (satu DB transaction) ---
-	//
 	// Repository menangani validasi kepemilikan rekening, status aktif, kecukupan saldo,
-	// debit saldo, log transaksi simpanan, dan insert gold_transactions — semuanya atomik.
 	goldTx, err := s.goldRepo.BuyWithDebit(ctx, userID, req.SavingsAccountID, req.GramAmount, price.BuyPricePerGram, totalRupiah)
 	if err != nil {
 		switch {
@@ -158,14 +105,7 @@ func (s *goldService) BuyGold(ctx context.Context, userID int64, req model.BuyGo
 	}
 
 	// --- Langkah 5: Push ID transaksi ke Redis queue (event-driven trigger) ---
-	//
 	// RPush menambahkan ID ke ujung kanan antrian "queue:gold_mint".
-	// GoldWorker yang sedang BLPop akan langsung terbangun dan memproses transaksi ini.
-	//
-	// Kenapa RPush dilakukan SETELAH commit, bukan di dalam DB transaction?
-	// - RPush di dalam DB tx tidak aman: jika tx di-rollback, pesan sudah terkirim ke Redis.
-	// - Di luar tx: jika RPush gagal setelah commit, transaksi tetap 'pending' di DB
-	//   dan bisa di-recover oleh mekanisme lain (admin trigger, restart worker, dll).
 	if s.rdb != nil {
 		if pushErr := s.rdb.RPush(ctx, goldMintQueueKey, goldTx.ID).Err(); pushErr != nil {
 			// Non-fatal: log peringatan tapi tetap return goldTx ke handler.

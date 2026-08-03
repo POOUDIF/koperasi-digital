@@ -1,10 +1,5 @@
 // Titik masuk (entry point) aplikasi Koperasi Digital.
-//
 // Urutan inisialisasi:
-//  1. Load konfigurasi dari environment variables (atau .env)
-//  2. Buka koneksi database dengan connection pool
-//  3. Inisialisasi router & daftarkan semua route
-//  4. Jalankan HTTP server
 package main
 
 import (
@@ -36,7 +31,6 @@ import (
 func main() {
 	// --- 1. Load .env (opsional, diabaikan jika file tidak ada) ---
 	// Di production, environment variables biasanya di-inject langsung oleh
-	// orchestrator (Docker, Kubernetes) sehingga file .env tidak diperlukan.
 	if err := godotenv.Load(); err != nil {
 		log.Println("[config] file .env tidak ditemukan, menggunakan environment variables sistem")
 	}
@@ -63,10 +57,6 @@ func main() {
 
 	// --- 4. Inisialisasi Redis client ---
 	// Redis digunakan untuk dua tujuan:
-	//   1. Caching harga emas (TTL 15 menit) — mengurangi beban query PostgreSQL.
-	//   2. Message queue "queue:gold_mint" — trigger event-driven ke GoldWorker.
-	// Jika Redis gagal terhubung, aplikasi dihentikan (Fatal) karena arsitektur
-	// event-driven bergantung pada Redis untuk memproses transaksi.
 	redisClient, err := database.NewRedisClient(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("[redis] gagal terhubung ke Redis: %v", err)
@@ -79,8 +69,6 @@ func main() {
 
 	// --- 5. Inisialisasi EVM Client (opsional) ---
 	// EVM client hanya diinisialisasi jika POLYGON_RPC_URL dikonfigurasi.
-	// Jika kosong, fitur blockchain dinonaktifkan dan server tetap berjalan normal.
-	// Ini memungkinkan development offline tanpa memerlukan koneksi ke node Polygon.
 	var evmClient *blockchain.Client
 	if cfg.PolygonRPCURL != "" {
 		var evmErr error
@@ -98,9 +86,6 @@ func main() {
 
 	// --- 6. Buat cancellable context untuk background worker ---
 	// Context ini digunakan sebagai sinyal shutdown untuk semua goroutine
-	// background (worker). Saat cancel() dipanggil, semua worker yang
-	// listening pada ctx.Done() akan berhenti secara graceful.
-	// BLPop di GoldWorker juga akan di-unblock oleh context cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -109,9 +94,6 @@ func main() {
 
 	// --- 8. Inisialisasi dan jalankan background worker (Event-Driven) ---
 	// GoldWorker memproses transaksi emas menggunakan BLPop pada "queue:gold_mint".
-	// Worker bangun hanya saat ada transaksi baru — tidak ada polling.
-	// Jika OwnerPrivateKey atau GoldContractAddress kosong, worker berjalan
-	// dalam mode "log-only" (tidak mengirim transaksi ke blockchain).
 	goldRepo := repository.NewGoldRepository(db, redisClient)
 	// userRepo diinject ke worker agar bisa mengambil wallet_address anggota sebelum mint.
 	// Menggunakan connection pool yang sama (db) — tidak ada koneksi ekstra.
@@ -120,16 +102,12 @@ func main() {
 
 	// Recover dijalankan secara sinkron SEBELUM Start() agar transaksi yang
 	// terjebak akibat crash/restart sebelumnya langsung diproses:
-	//   - 'pending'    : di-requeue ke Redis → diproses oleh BLPop loop.
-	//   - 'processing' : awaitReceipt dilanjutkan dari tx_hash yang sudah tersimpan.
 	goldWorker.Recover(ctx)
 
 	go goldWorker.Start(ctx)
 
 	// --- 8. Jalankan server dengan graceful shutdown ---
 	// Graceful shutdown memastikan request yang sedang diproses selesai dulu
-	// sebelum server benar-benar berhenti — penting agar tidak ada transaksi
-	// koperasi yang terpotong di tengah jalan.
 	srv := &http.Server{
 		Addr:    ":" + cfg.ServerPort,
 		Handler: router,
@@ -157,7 +135,6 @@ func main() {
 
 	// Langkah 1: Hentikan semua background worker terlebih dahulu.
 	// cancel() mengirim sinyal ke ctx.Done() sehingga GoldWorker (dan worker
-	// lain di masa depan) berhenti memproses pekerjaan baru.
 	cancel()
 	log.Println("[server] background worker dihentikan.")
 
@@ -175,22 +152,11 @@ func main() {
 
 // setupRouter mendaftarkan semua route dan middleware ke Gin engine.
 // Dipisahkan dari main() agar mudah di-test secara independen.
-//
-// Dependency Injection dilakukan di sini: DB → Repository → Service → Handler.
-// Setiap layer hanya tahu tentang layer di bawahnya melalui interface.
 func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *blockchain.Client) *gin.Engine {
 	router := gin.New()
 
 	// --- CORS harus didaftarkan PERTAMA, sebelum middleware lain ---
-	//
 	// Mengapa penting urutan ini?
-	// Browser mengirim preflight request (OPTIONS) sebelum request utama.
-	// Jika CORS tidak ditangani sebelum middleware autentikasi berjalan,
-	// preflight akan ditolak dengan 401 — padahal preflight tidak membawa token.
-	// Akibatnya browser memblokir seluruh request dari frontend.
-	//
-	// Konfigurasi ini mengizinkan HANYA origin FrontendURL (dari config/.env).
-	// Di production, ganti FRONTEND_URL ke domain frontend sesungguhnya.
 	router.Use(cors.New(cors.Config{
 		// Satu origin eksplisit — lebih aman daripada wildcard "*" yang
 		// tidak kompatibel dengan AllowCredentials: true.
@@ -200,8 +166,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 
 		// Header yang boleh dikirim oleh browser dalam request.
-		//   Authorization : untuk JWT Bearer token.
-		//   Content-Type  : agar browser boleh kirim JSON body.
+		// Authorization : untuk JWT Bearer token.
 		AllowHeaders: []string{"Authorization", "Content-Type"},
 
 		// Header response yang boleh dibaca oleh JavaScript di browser.
@@ -213,7 +178,6 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 
 		// Preflight response di-cache browser selama 12 jam.
 		// Browser tidak akan mengirim OPTIONS lagi untuk kombinasi method+header
-		// yang sama selama durasi ini — mengurangi jumlah request ke server.
 		MaxAge: 12 * time.Hour,
 	}))
 
@@ -247,7 +211,6 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 
 	// --- Registrasi route ---
 	// Semua endpoint dikelompokkan di bawah prefix /api/v1
-	// sehingga mudah menambahkan versi API baru (/api/v2) di masa depan.
 	v1 := router.Group("/api/v1")
 	{
 		// Health-check: tidak butuh autentikasi, dipanggil oleh load-balancer.
@@ -262,12 +225,6 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 
 		// Endpoint terproteksi — setiap route di grup ini wajib menyertakan
 		// header "Authorization: Bearer <token>" yang valid, dan akun user
-		// harus berstatus 'active'.
-		//
-		// Dua middleware dirantai:
-		//  1. RequireAuth        : validasi JWT (signature + expiry).
-		//  2. RequireActiveUserDB: cek status akun dari DB — memastikan akun yang
-		//     di-suspend SETELAH token diterbitkan langsung diblokir pada request berikutnya.
 		protected := v1.Group("",
 			middleware.RequireAuth(cfg.JWTSecret, rdb),
 			middleware.RequireActiveUserDB(db),
@@ -293,13 +250,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		}
 
 		// --- Grup Admin: RequireAuth + RequireRole dirantai ---
-		//
 		// Semua route di bawah /admin memerlukan dua lapis validasi:
-		//   1. RequireAuth  : token JWT harus valid.
-		//   2. RequireRole  : role user harus salah satu dari yang diizinkan.
-		//
-		// Urutan middleware PENTING: RequireAuth harus lebih dulu karena
-		// RequireRole membaca user_id dari context yang diisi RequireAuth.
 		admin := v1.Group("/admin",
 			middleware.RequireAuth(cfg.JWTSecret, rdb),
 			middleware.RequireRole(db, "pengurus", "admin", "super_admin"),

@@ -1,22 +1,11 @@
 // Package model — struct domain untuk modul Jual Beli Emas Digital.
-//
 // Dua entitas utama:
-//   - GoldPrice       : snapshot harga emas per gram yang ditetapkan koperasi.
-//   - GoldTransaction : satu transaksi jual atau beli emas oleh anggota.
-//
-// Hubungan dengan blockchain:
-//   - GoldTransaction.TxHash diisi oleh worker/job setelah transaksi dikonfirmasi
-//     on-chain di Polygon. NULL selama status masih 'pending'/'processing'.
 package model
 
 import "time"
 
 // GoldPrice merepresentasikan satu snapshot harga emas per gram.
-//
 // Harga diperbarui secara periodik oleh admin atau price-feed oracle.
-// Endpoint GET /gold/price selalu mengembalikan baris dengan UpdatedAt terbaru.
-//
-// Spread (buy - sell) adalah keuntungan koperasi dari selisih harga jual dan beli.
 type GoldPrice struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -33,15 +22,7 @@ type GoldPrice struct {
 }
 
 // GoldTransaction merepresentasikan satu transaksi jual/beli emas oleh anggota.
-//
 // Alur status:
-//
-//	pending → processing → success   (jalur normal)
-//	pending → processing → failed    (gagal on-chain, saldo di-refund)
-//	pending →             failed     (gagal sebelum dikirim ke chain)
-//
-// PricePerGram dan TotalRupiah disimpan per-transaksi agar perubahan harga
-// di gold_prices tidak mengubah nilai transaksi yang sudah terjadi.
 type GoldTransaction struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -65,14 +46,10 @@ type GoldTransaction struct {
 
 	// TxHash adalah hash transaksi on-chain dari Polygon Smart Contract.
 	// NULL selama status 'pending'/'processing'; diisi setelah konfirmasi blockchain.
-	// Pakai *string agar bisa dibedakan antara "belum ada" (nil) dan hash kosong "".
 	TxHash *string `db:"tx_hash" json:"tx_hash,omitempty"`
 
 	// Status alur:
-	//   pending    : saldo dipotong, menunggu antrian worker blockchain.
-	//   processing : sudah dikirim ke Polygon, menunggu konfirmasi blok.
-	//   success    : dikonfirmasi on-chain, token emas diterbitkan.
-	//   failed     : gagal; jika saldo sudah dipotong, proses refund dipicu.
+	// pending    : saldo dipotong, menunggu antrian worker blockchain.
 	Status string `db:"status" json:"status"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
@@ -80,17 +57,12 @@ type GoldTransaction struct {
 
 // =============================================================================
 // Request / Response Payload — HTTP layer untuk modul emas
-// =============================================================================
 
 // BuyGoldRequest adalah payload JSON untuk POST /api/v1/gold/buy.
-//
 // Anggota memilih berapa gram yang ingin dibeli dan dari rekening simpanan
-// Wadiah mana dana akan didebet.
 type BuyGoldRequest struct {
 	// GramAmount adalah berat emas yang ingin dibeli dalam satuan gram.
 	// Harus lebih dari 0. Tidak ada batas maksimum di level validasi Gin —
-	// batas bisnis (misalnya maks 100 gram/hari) bisa ditambahkan di service layer.
-	// Batas minimum 0.0001 gram untuk mencegah presisi error dari float64.
 	GramAmount float64 `json:"gram_amount" binding:"required,min=0.0001"`
 
 	// SavingsAccountID adalah ID rekening simpanan Wadiah yang saldonya akan didebet.
@@ -99,9 +71,7 @@ type BuyGoldRequest struct {
 }
 
 // SellGoldRequest adalah payload JSON untuk POST /api/v1/gold/sell.
-//
 // Anggota menjual emas mereka dan meminta dana hasil penjualannya dikreditkan
-// ke rekening Wadiah.
 type SellGoldRequest struct {
 	// GramAmount adalah berat emas yang ingin dijual.
 	// Batas minimum 0.0001 gram.

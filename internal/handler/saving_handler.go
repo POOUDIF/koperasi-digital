@@ -1,13 +1,5 @@
 // Package handler — HTTP handler untuk modul simpanan syariah.
-//
 // Tanggung jawab SavingHandler:
-//  1. Membaca user_id dari Gin context (diinject oleh middleware JWT).
-//  2. Membaca & memvalidasi request body JSON.
-//  3. Memanggil SavingService.
-//  4. Menerjemahkan hasil/error service menjadi HTTP response yang tepat.
-//
-// Handler TIDAK boleh berisi logika bisnis (validasi min_deposit, authorization
-// kepemilikan rekening, dsb.) — semua itu ada di service layer.
 package handler
 
 import (
@@ -33,13 +25,7 @@ func NewSavingHandler(savingService service.SavingService) *SavingHandler {
 }
 
 // extractUserID mengambil user_id dari Gin context yang sudah diisi middleware JWT.
-//
 // Ini adalah helper privat yang menghilangkan duplikasi boilerplate di setiap handler.
-// Mengembalikan (userID, true) jika berhasil, atau (0, false) jika gagal.
-//
-// Kegagalan di sini seharusnya tidak terjadi jika middleware.RequireAuth terpasang
-// dengan benar di router, tapi kita tangani secara defensif agar bug konfigurasi
-// tidak menyebabkan data user lain bocor.
 func extractUserID(c *gin.Context) (int64, bool) {
 	rawID, exists := c.Get(middleware.ContextKeyUserID)
 	if !exists {
@@ -53,22 +39,7 @@ func extractUserID(c *gin.Context) (int64, bool) {
 }
 
 // OpenAccount menangani POST /api/v1/savings/accounts.
-//
 // Membuka rekening simpanan baru untuk anggota yang sedang login.
-//
-// Request body (JSON):
-//
-//	{ "savings_product_id": 1 }
-//
-// Response sukses (201 Created):
-//
-//	{ "id": 5, "user_id": 12, "savings_product_id": 1, "balance": 0, "status": "active", ... }
-//
-// Response gagal:
-//   - 400 Bad Request  : body tidak valid / savings_product_id tidak dikirim
-//   - 401 Unauthorized : token JWT tidak ada atau tidak valid
-//   - 404 Not Found    : produk simpanan tidak ditemukan
-//   - 500 Internal     : error tak terduga di server
 func (h *SavingHandler) OpenAccount(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {
@@ -96,19 +67,7 @@ func (h *SavingHandler) OpenAccount(c *gin.Context) {
 }
 
 // GetAccounts menangani GET /api/v1/savings/accounts.
-//
 // Mengembalikan semua rekening simpanan milik user yang sedang login.
-//
-// Response sukses (200 OK):
-//
-//	{ "accounts": [ { "id": 5, "balance": 150000, ... }, ... ] }
-//
-// Catatan: jika user belum punya rekening, "accounts" berupa array kosong ([]),
-// bukan null — agar client tidak perlu pengecekan null tambahan.
-//
-// Response gagal:
-//   - 401 Unauthorized : token JWT tidak ada atau tidak valid
-//   - 500 Internal     : error tak terduga di server
 func (h *SavingHandler) GetAccounts(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {
@@ -126,25 +85,7 @@ func (h *SavingHandler) GetAccounts(c *gin.Context) {
 }
 
 // Deposit menangani POST /api/v1/savings/deposit.
-//
 // Menyetor dana ke rekening simpanan milik user yang sedang login.
-// Operasi ini atomik: balance terupdate DAN log transaksi tercatat,
-// atau keduanya batal jika ada kegagalan di tengah jalan.
-//
-// Request body (JSON):
-//
-//	{ "account_id": 5, "amount": 100000, "reference_id": "TRF-20240416-001" }
-//
-// Response sukses (200 OK):
-//
-//	{ "message": "setoran berhasil" }
-//
-// Response gagal:
-//   - 400 Bad Request         : body tidak valid / amount <= 0
-//   - 401 Unauthorized        : token JWT tidak ada atau tidak valid
-//   - 404 Not Found           : rekening tidak ditemukan (atau bukan milik user ini)
-//   - 422 Unprocessable Entity: rekening tidak aktif / nominal di bawah minimum
-//   - 500 Internal            : error tak terduga di server
 func (h *SavingHandler) Deposit(c *gin.Context) {
 	userID, ok := extractUserID(c)
 	if !ok {

@@ -1,12 +1,5 @@
 // Package service — logika bisnis modul Pembiayaan Syariah Murabahah.
-//
 // Posisi dalam arsitektur:
-//
-//	Handler → FinancingService → FinancingRepository → Database
-//
-// Service layer adalah satu-satunya tempat aturan bisnis murabahah diimplementasi:
-// penghitungan margin, validasi kelayakan, pembentukan financing_number,
-// dan generasi jadwal angsuran saat approval.
 package service
 
 import (
@@ -32,7 +25,6 @@ var (
 
 	// ErrInvalidReviewAction dikembalikan jika action selain "approve"/"reject" dikirim.
 	// Dalam praktik sudah dicegah oleh binding:"oneof=approve reject" di handler,
-	// tapi didefinisikan di sini untuk defense-in-depth.
 	ErrInvalidReviewAction = errors.New("aksi review tidak valid, gunakan 'approve' atau 'reject'")
 
 	// ErrInstallmentNotFound dikembalikan saat cicilan tidak ditemukan atau bukan
@@ -60,9 +52,7 @@ type FinancingService interface {
 	GetMyFinancings(ctx context.Context, userID int64) ([]model.Financing, error)
 
 	// ReviewFinancing memproses keputusan admin terhadap satu pengajuan.
-	//   action "approve" → update status + generate jadwal angsuran (atomik via DB tx).
-	//   action "reject"  → update status saja.
-	// Hanya pengajuan berstatus 'pending' yang bisa direview.
+	// action "approve" → update status + generate jadwal angsuran (atomik via DB tx).
 	ReviewFinancing(ctx context.Context, financingID int64, adminID int64, action string) (*model.Financing, error)
 
 	// GetMyInstallments mengambil semua cicilan milik satu pengajuan pembiayaan.
@@ -71,11 +61,6 @@ type FinancingService interface {
 
 	// PayMyInstallment memproses pembayaran satu cicilan oleh anggota.
 	// Validasi yang dilakukan (secara berurutan):
-	//  1. Cicilan harus ada dan milik pengajuan yang dimiliki userID.
-	//  2. Status cicilan harus 'unpaid'.
-	//  3. Rekening simpanan harus aktif, milik userID, dan saldonya mencukupi.
-	// Seluruh operasi DB (debit saldo, log transaksi, update cicilan, cek pelunasan)
-	// dijalankan secara atomik di repository layer.
 	PayMyInstallment(ctx context.Context, userID int64, installmentID int64, req model.PayInstallmentRequest) error
 }
 
@@ -94,13 +79,7 @@ func NewFinancingService(financingRepo repository.FinancingRepository, marginRat
 }
 
 // ApplyMurabahah memproses pengajuan pembiayaan murabahah oleh anggota.
-//
 // Urutan langkah:
-//  1. Hitung margin_amount  = principal_amount × 10%.
-//  2. Hitung total_payable  = principal_amount + margin_amount.
-//  3. Generate financing_number unik berbasis unix nanosecond.
-//  4. Bangun struct Financing dengan status "pending".
-//  5. Simpan ke database via repository.
 func (s *financingService) ApplyMurabahah(ctx context.Context, userID int64, req model.ApplyFinancingRequest) (*model.Financing, error) {
 	// Kita gunakan helper roundTo4Decimals agar tidak ada pergeseran presisi.
 	marginAmount := util.RoundTo4Decimals(req.PrincipalAmount * s.marginRate)
@@ -157,19 +136,7 @@ func (s *financingService) GetMyFinancings(ctx context.Context, userID int64) ([
 }
 
 // ReviewFinancing memproses keputusan admin (approve/reject) terhadap pengajuan.
-//
 // Aturan bisnis:
-//  1. Pengajuan harus ada di database.
-//  2. Status saat ini harus 'pending' — tidak boleh mereview yang sudah diproses.
-//  3. Jika approve: generate jadwal angsuran dan simpan semuanya secara atomik.
-//  4. Jika reject: update status saja.
-//  5. Kembalikan data financing terbaru sebagai respons.
-//
-// Generasi Jadwal Angsuran (Murabahah Flat):
-//   - Nominal per angsuran = ceil(total_payable / duration_months) untuk semua kecuali
-//     angsuran terakhir yang mendapat sisa (menghindari selisih akibat pembulatan).
-//   - Tanggal jatuh tempo = tanggal approval + N bulan (N = nomor urut angsuran).
-//   - Pembulatan ke 4 desimal dengan math.Round agar nilai DECIMAL(19,4) di DB akurat.
 func (s *financingService) ReviewFinancing(ctx context.Context, financingID int64, adminID int64, action string) (*model.Financing, error) {
 	// Langkah 1: Ambil data pengajuan.
 	financing, err := s.financingRepo.FindByID(ctx, financingID)
@@ -207,7 +174,6 @@ func (s *financingService) ReviewFinancing(ctx context.Context, financingID int6
 
 	// Langkah 4: Ambil ulang data terbaru dari DB untuk dikembalikan ke handler.
 	// Ini memastikan response mencerminkan state yang benar-benar tersimpan,
-	// termasuk reviewed_at yang di-generate oleh database (NOW()).
 	updated, err := s.financingRepo.FindByID(ctx, financingID)
 	if err != nil {
 		return nil, fmt.Errorf("mengambil data pembiayaan setelah review gagal: %w", err)
@@ -218,8 +184,6 @@ func (s *financingService) ReviewFinancing(ctx context.Context, financingID int6
 
 // handleApprove menghitung jadwal angsuran dan memanggil repository untuk
 // menyimpan update status + semua angsuran dalam satu database transaction.
-//
-// Ini adalah helper private — hanya dipanggil dari ReviewFinancing.
 func (s *financingService) handleApprove(ctx context.Context, f *model.Financing, adminID int64) error {
 	installments := s.generateInstallments(f)
 
@@ -234,20 +198,7 @@ func (s *financingService) handleApprove(ctx context.Context, f *model.Financing
 }
 
 // generateInstallments menghasilkan slice jadwal angsuran untuk pembiayaan murabahah flat.
-//
 // Algoritma pembulatan yang adil (banker's rounding sederhana):
-//   - Hitung nominal "ideal" per angsuran = total_payable / duration_months.
-//   - Bulatkan ke 4 desimal menggunakan math.Round.
-//   - Angsuran terakhir mendapat sisa = total_payable - (nominal × (n-1))
-//     untuk memastikan total semua angsuran = total_payable persis.
-//
-// Contoh: total_payable = 16.500.000, duration = 12 bulan
-//
-//	→ per angsuran = 1.375.000,0000
-//	→ angsuran 1–11 = 1.375.000,0000
-//	→ angsuran 12   = 16.500.000 - (1.375.000 × 11) = 1.375.000,0000 (pas)
-//
-// Tanggal jatuh tempo mulai 1 bulan dari sekarang (hari approval).
 func (s *financingService) generateInstallments(f *model.Financing) []model.FinancingInstallment {
 	n := f.DurationMonths
 
@@ -281,11 +232,7 @@ func (s *financingService) generateInstallments(f *model.Financing) []model.Fina
 }
 
 // GetMyInstallments mengambil semua cicilan milik satu pengajuan pembiayaan.
-//
 // Aturan otorisasi:
-//   - Ambil data pengajuan terlebih dahulu dan pastikan user_id-nya cocok.
-//   - Kembalikan ErrFinancingNotFound jika tidak ada atau bukan milik userID
-//     (mencegah anggota mengintip cicilan milik orang lain via ID brute-force).
 func (s *financingService) GetMyInstallments(ctx context.Context, userID int64, financingID int64) ([]model.FinancingInstallment, error) {
 	financing, err := s.financingRepo.FindByID(ctx, financingID)
 	if err != nil {
@@ -310,16 +257,7 @@ func (s *financingService) GetMyInstallments(ctx context.Context, userID int64, 
 }
 
 // PayMyInstallment memproses pembayaran satu cicilan oleh anggota.
-//
 // Validasi yang dilakukan sebelum memanggil repository:
-//  1. Cicilan harus ada (ErrInstallmentNotFound jika tidak).
-//  2. Pengajuan induk harus milik userID (mencegah anggota membayar cicilan orang lain).
-//  3. Status cicilan harus 'unpaid' (ErrInstallmentAlreadyPaid jika sudah paid).
-//
-// Validasi di dalam DB transaction (repository layer):
-//  4. Rekening simpanan harus ada dan milik userID (ErrSavingsAccountNotFound).
-//  5. Rekening harus berstatus 'active' (ErrAccountNotActive).
-//  6. Saldo harus >= amount_due cicilan (ErrInsufficientBalance).
 func (s *financingService) PayMyInstallment(ctx context.Context, userID int64, installmentID int64, req model.PayInstallmentRequest) error {
 	// Langkah 1: Ambil data cicilan.
 	installment, err := s.financingRepo.GetInstallmentByID(ctx, installmentID)

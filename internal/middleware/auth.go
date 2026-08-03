@@ -14,7 +14,6 @@ import (
 
 // Context key yang dipakai untuk menyimpan & membaca klaim JWT di Gin context.
 // Diekspor sebagai konstanta agar handler tidak perlu menulis ulang string literal —
-// satu titik definisi mencegah typo yang sulit di-debug.
 const (
 	ContextKeyUserID = "user_id" // nilai: int64
 	ContextKeyEmail  = "email"   // nilai: string
@@ -29,16 +28,7 @@ type authClaims struct {
 }
 
 // RequireAuth mengembalikan Gin HandlerFunc yang memvalidasi JWT pada setiap request.
-//
 // Alur kerja middleware:
-//  1. Baca header "Authorization: Bearer <token>".
-//  2. Parse dan verifikasi signature token menggunakan jwtSecret.
-//  3. Periksa bahwa token belum kadaluarsa (ditangani otomatis oleh library jwt/v5).
-//  4. Sematkan user_id dan email ke Gin context agar bisa dibaca handler berikutnya.
-//  5. Jika ada langkah yang gagal → hentikan request dengan 401, handler tidak dijalankan.
-//
-// Menerima jwtSecret sebagai parameter (bukan global variable) agar middleware bisa
-// di-test secara independen dengan secret berbeda. rdb dipakai untuk validasi blocklist (Logout).
 func RequireAuth(jwtSecret string, rdb *redis.Client) gin.HandlerFunc {
 	secret := []byte(jwtSecret)
 
@@ -68,9 +58,6 @@ func RequireAuth(jwtSecret string, rdb *redis.Client) gin.HandlerFunc {
 
 		// Langkah 3: Parse dan verifikasi token.
 		// Fungsi keyFunc dipanggil oleh library untuk mendapatkan kunci verifikasi.
-		// Kita periksa algoritma di sini untuk mencegah "algorithm confusion attack" —
-		// serangan di mana penyerang mengganti header alg menjadi "none" atau "RS256"
-		// agar server menggunakan kunci yang salah.
 		claims := &authClaims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -96,26 +83,6 @@ func RequireAuth(jwtSecret string, rdb *redis.Client) gin.HandlerFunc {
 
 // RequireActiveUserDB mengembalikan Gin HandlerFunc yang memverifikasi bahwa akun user
 // masih berstatus 'active' di database pada setiap request.
-//
-// HARUS dirantai SETELAH RequireAuth karena bergantung pada ContextKeyUserID
-// yang sudah disematkan RequireAuth ke Gin context.
-//
-// Mengapa perlu middleware ini jika Login sudah cek status?
-//   - JWT bersifat stateless: setelah diterbitkan, token tetap valid sampai expired.
-//   - Jika admin men-suspend user SETELAH token diterbitkan, user masih bisa
-//     mengakses semua endpoint protected menggunakan token lama.
-//   - Middleware ini memastikan perubahan status berlaku segera pada request berikutnya,
-//     tanpa harus menunggu token expired.
-//
-// Trade-off: satu extra DB query ringan (SELECT satu kolom) per request.
-// Pattern ini identik dengan RequireRole yang sudah ada dan sudah terbukti acceptable.
-//
-// Contoh penggunaan di router:
-//
-//	protected := v1.Group("",
-//	    middleware.RequireAuth(cfg.JWTSecret),
-//	    middleware.RequireActiveUserDB(db),
-//	)
 func RequireActiveUserDB(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Ambil user_id dari context yang sudah diisi RequireAuth.
@@ -157,7 +124,6 @@ func RequireActiveUserDB(db *sql.DB) gin.HandlerFunc {
 
 		// Hanya status 'active' yang diizinkan mengakses endpoint protected.
 		// 'inactive' dan 'banned' dikembalikan 403 Forbidden agar client tahu
-		// ini bukan masalah token, melainkan kebijakan akun.
 		if status != "active" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "akun tidak aktif atau diblokir, hubungi admin koperasi",

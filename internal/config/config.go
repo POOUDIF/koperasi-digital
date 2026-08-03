@@ -24,43 +24,26 @@ type Config struct {
 
 	// Margin Pembiayaan
 	// Nilai desimal yang mengontrol rasio keuntungan Murabahah terhadap principal
-	// Default: 0.10 (10%)
 	MurabahahMarginRate float64
 
 	// Frontend
 	// FrontendURL adalah origin yang diizinkan oleh middleware CORS.
-	// Development : http://localhost:3000
-	// Production  : https://koperasi.id  (atau domain frontend production)
 	FrontendURL string
 
 	// Redis
 	// RedisURL adalah alamat server Redis dalam format "host:port".
-	// Digunakan untuk caching harga emas dan message queue transaksi.
-	// Default: "localhost:6379"
 	RedisURL string
 
 	// Blockchain
 	// PolygonRPCURL adalah URL endpoint JSON-RPC node Polygon.
-	// Contoh:
-	//   Amoy Testnet  : https://rpc-amoy.polygon.technology
-	//   Polygon Mainnet: https://polygon-rpc.com
-	//   Alchemy       : https://polygon-mainnet.g.alchemy.com/v2/<API_KEY>
-	// Jika kosong, EVM client tidak diinisialisasi (fitur blockchain dinonaktifkan).
 	PolygonRPCURL string
 
 	// OwnerPrivateKey adalah hex-encoded private key wallet owner Smart Contract.
 	// Digunakan oleh GoldWorker untuk menandatangani transaksi mint/burn on-chain.
-	// Format: dengan atau tanpa prefix "0x", contoh: "0xabc123..." atau "abc123..."
-	// Jika kosong, GoldWorker akan skip operasi blockchain (hanya log).
-	//
-	// KEAMANAN: Jangan pernah commit nilai ini ke version control.
-	// Gunakan environment variable atau secret manager di production.
 	OwnerPrivateKey string
 
 	// GoldContractAddress adalah alamat Smart Contract CoopGold di Polygon.
 	// Format: "0x" + 40 karakter hexadecimal.
-	// Contoh: "0x1234567890abcdef1234567890abcdef12345678"
-	// Jika kosong, GoldWorker akan skip operasi blockchain.
 	GoldContractAddress string
 }
 
@@ -75,8 +58,6 @@ type DBConfig struct {
 
 	// Connection Pool — mengontrol jumlah koneksi yang dibuka ke database.
 	// MaxOpenConns : batas atas koneksi aktif (0 = tidak terbatas, hindari ini di prod).
-	// MaxIdleConns : koneksi yang tetap "hidup" dalam pool meski sedang tidak dipakai.
-	// ConnMaxLifetimeSec : berapa detik sebuah koneksi boleh hidup sebelum dibuang & diganti.
 	MaxOpenConns       int
 	MaxIdleConns       int
 	ConnMaxLifetimeSec int

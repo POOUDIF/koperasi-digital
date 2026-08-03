@@ -1,20 +1,11 @@
 // Package model — struct domain untuk modul Pembiayaan Syariah.
-//
 // Entitas dalam modul ini:
-//   - Financing            : master data satu pengajuan pembiayaan.
-//   - FinancingInstallment : satu baris jadwal angsuran bulanan.
-//
-// Request/response payload HTTP juga didefinisikan di sini agar tetap
-// satu package dengan domain-nya (konsisten dengan pola model/saving.go).
 package model
 
 import "time"
 
 // Financing merepresentasikan satu pengajuan pembiayaan syariah.
-//
 // Setelah akad disepakati (status → approved), nilai PrincipalAmount,
-// MarginAmount, dan TotalPayable TIDAK BOLEH berubah — prinsip transparansi
-// murabahah mengharuskan harga jual ditetapkan dan diketahui anggota di awal.
 type Financing struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -45,13 +36,11 @@ type Financing struct {
 	DurationMonths int `db:"duration_months" json:"duration_months"`
 
 	// Status alur pengajuan:
-	//   pending  → approved → active → paid
-	//   pending  → rejected
+	// pending  → approved → active → paid
 	Status string `db:"status" json:"status"`
 
 	// ReviewedBy adalah user_id admin/pengurus yang melakukan approve atau reject.
 	// NULL selama status masih 'pending'. Pakai pointer agar bisa dibedakan antara
-	// "belum direview" (nil) dan "direview oleh user ID 0" (tidak valid).
 	ReviewedBy *int64 `db:"reviewed_by" json:"reviewed_by,omitempty"`
 
 	// ReviewedAt adalah timestamp keputusan review. NULL selama pending.
@@ -61,10 +50,7 @@ type Financing struct {
 }
 
 // FinancingInstallment merepresentasikan satu baris jadwal angsuran bulanan.
-//
 // Baris ini dibuat oleh sistem saat pembiayaan disetujui (status → active).
-// Setiap baris mewakili satu bulan: nomor angsuran, tanggal jatuh tempo,
-// nominal yang harus dibayar, dan berapa yang sudah dibayar.
 type FinancingInstallment struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -94,12 +80,9 @@ type FinancingInstallment struct {
 
 // =============================================================================
 // Request / Response Payload — HTTP layer untuk modul pembiayaan
-// =============================================================================
 
 // ApplyFinancingRequest adalah payload JSON untuk POST /api/v1/financing/apply.
-//
 // Dua field ini cukup untuk versi awal — service akan menghitung margin,
-// total, dan menghasilkan nomor pengajuan secara otomatis.
 type ApplyFinancingRequest struct {
 	// PrincipalAmount adalah harga pokok barang yang ingin dibiayai (dalam Rupiah).
 	// Harus lebih dari 0.

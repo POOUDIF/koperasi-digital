@@ -1,12 +1,5 @@
 // cmd/checkconn adalah tool CLI untuk memverifikasi koneksi ke node EVM.
-//
 // Penggunaan:
-//
-//	go run ./cmd/checkconn
-//
-// Tool ini membaca POLYGON_RPC_URL dari environment variable atau file .env,
-// lalu mencetak Chain ID dan nomor blok terbaru jika koneksi berhasil.
-// Berguna untuk debugging sebelum menjalankan server utama.
 package main
 
 import (

@@ -1,13 +1,5 @@
 // Package repository menangani semua operasi baca/tulis ke database.
-//
 // Pola yang digunakan: Repository Interface + Concrete Implementation.
-//
-//	UserRepository (interface)
-//	    ↑
-//	postgresUserRepository (struct) — implementasi nyata dengan *sql.DB
-//
-// Dengan pola ini, layer service hanya bergantung pada interface, sehingga
-// saat testing kita bisa menyuntikkan mock tanpa menyentuh database sungguhan.
 package repository
 
 import (
@@ -23,7 +15,6 @@ import (
 
 // ErrUserNotFound dikembalikan saat user dengan kriteria tertentu tidak ditemukan.
 // Didefinisikan di sini agar service layer bisa membandingkan error secara eksplisit
-// tanpa bergantung pada pesan string dari database driver.
 var ErrUserNotFound = errors.New("user tidak ditemukan")
 
 // ErrEmailAlreadyExists dikembalikan saat mencoba menyimpan email yang sudah terdaftar.
@@ -34,7 +25,6 @@ const pgUniqueViolation = "23505"
 
 // UserRepository mendefinisikan kontrak operasi database untuk entitas User.
 // Service layer hanya boleh berkomunikasi lewat interface ini, bukan lewat
-// struct konkret — prinsip Dependency Inversion.
 type UserRepository interface {
 	// Insert menyimpan user baru ke database dan mengembalikan user dengan ID yang diisi.
 	Insert(ctx context.Context, user *model.User) (*model.User, error)
@@ -50,27 +40,18 @@ type UserRepository interface {
 
 // postgresUserRepository adalah implementasi UserRepository yang menggunakan PostgreSQL.
 // Huruf kecil di awal nama struct berarti ia tidak diekspor — hanya bisa diakses
-// melalui konstruktor NewUserRepository di bawah.
 type postgresUserRepository struct {
 	db *sql.DB
 }
 
 // NewUserRepository membuat instance repository baru.
 // Mengembalikan interface (bukan *postgresUserRepository) agar caller tidak
-// bisa bergantung pada detail implementasi.
 func NewUserRepository(db *sql.DB) UserRepository {
 	return &postgresUserRepository{db: db}
 }
 
 // Insert menyimpan user baru ke tabel `users`.
-//
 // Klausa RETURNING dipakai untuk mendapatkan id, role, status, dan timestamps
-// yang di-generate oleh database dalam satu round-trip — lebih efisien
-// daripada INSERT lalu SELECT terpisah.
-//
-// Jika email sudah ada (unique constraint), *pq.Error dengan Code "23505"
-// diterjemahkan menjadi ErrEmailAlreadyExists agar service tidak perlu tahu
-// detail driver PostgreSQL.
 func (r *postgresUserRepository) Insert(ctx context.Context, user *model.User) (*model.User, error) {
 	query := `
 		INSERT INTO users (nama_lengkap, email, password_hash)
@@ -97,9 +78,7 @@ func (r *postgresUserRepository) Insert(ctx context.Context, user *model.User) (
 }
 
 // FindByID mengambil satu baris user berdasarkan primary key (id).
-//
 // Dipakai oleh GetProfile setelah middleware memverifikasi JWT — kita sudah
-// punya user_id dari token, sehingga tidak perlu query berdasarkan email.
 func (r *postgresUserRepository) FindByID(ctx context.Context, id int64) (*model.User, error) {
 	query := `
 		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at
@@ -131,9 +110,7 @@ func (r *postgresUserRepository) FindByID(ctx context.Context, id int64) (*model
 }
 
 // FindByEmail mengambil satu baris user berdasarkan kolom email.
-//
 // sql.ErrNoRows (dikembalikan saat tidak ada baris yang cocok) diterjemahkan
-// menjadi ErrUserNotFound agar service layer tidak perlu tahu detail driver.
 func (r *postgresUserRepository) FindByEmail(ctx context.Context, email string) (*model.User, error) {
 	query := `
 		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at

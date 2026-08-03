@@ -14,30 +14,7 @@ import (
 const ContextKeyRole = "role"
 
 // RequireRole mengembalikan Gin HandlerFunc yang memvalidasi role user.
-//
 // Middleware ini HARUS dirantai setelah RequireAuth karena bergantung pada
-// ContextKeyUserID yang sudah disematkan RequireAuth ke dalam Gin context.
-//
-// Alur kerja:
-//  1. Baca user_id dari Gin context (diset oleh RequireAuth).
-//  2. Query kolom `role` dari tabel `users` berdasarkan user_id tersebut.
-//  3. Periksa apakah role user ada dalam daftar allowedRoles.
-//  4. Jika ya  → sematkan role ke context dan lanjutkan ke handler.
-//  5. Jika tidak → hentikan request dengan 403 Forbidden.
-//
-// Mengapa query database per request, bukan simpan role di JWT?
-// Jika role disimpan di JWT, perubahan role (misalnya pencabutan hak admin)
-// tidak langsung berlaku — user masih bisa menggunakan token lama sampai expired.
-// Dengan query DB, perubahan role berlaku efektif segera pada request berikutnya.
-// Trade-off: satu extra query DB per request admin (dapat dikurangi dengan cache
-// jika volume tinggi di iterasi berikutnya).
-//
-// Contoh penggunaan di router:
-//
-//	adminGroup := v1.Group("/admin",
-//	    middleware.RequireAuth(cfg.JWTSecret),
-//	    middleware.RequireRole(db, "admin", "super_admin"),
-//	)
 func RequireRole(db *sql.DB, allowedRoles ...string) gin.HandlerFunc {
 	// Bangun set untuk lookup O(1) — lebih efisien daripada iterasi slice
 	// setiap kali middleware dijalankan, terutama jika allowedRoles panjang.
@@ -69,7 +46,6 @@ func RequireRole(db *sql.DB, allowedRoles ...string) gin.HandlerFunc {
 
 		// Langkah 2: Query role dari database.
 		// Kita hanya SELECT satu kolom — query ini sangat ringan dan
-		// dapat di-cache di masa depan jika diperlukan.
 		var role string
 		err := db.QueryRowContext(
 			c.Request.Context(),

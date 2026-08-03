@@ -1,11 +1,5 @@
 // Package service berisi logika bisnis aplikasi.
-//
 // Layer ini berada di antara handler (HTTP) dan repository (database):
-//
-//	Handler → Service → Repository → Database
-//
-// Service tidak boleh tahu apapun tentang HTTP (gin.Context, status code, dsb.)
-// maupun tentang detail SQL. Tugasnya murni: orkestrasi aturan bisnis.
 package service
 
 import (
@@ -31,8 +25,6 @@ var (
 
 	// ErrAccountSuspended dikembalikan saat user mencoba login dengan akun
 	// yang berstatus 'inactive' atau 'banned'.
-	// Dibedakan dari ErrInvalidCredentials agar client bisa menampilkan pesan yang sesuai,
-	// namun tetap tidak mengungkap apakah email terdaftar atau tidak (dicek setelah auth berhasil).
 	ErrAccountSuspended = errors.New("akun tidak aktif atau diblokir, hubungi admin koperasi")
 )
 
@@ -70,12 +62,7 @@ type userService struct {
 }
 
 // NewUserService membuat instance service baru dengan dependency yang diinject.
-//
 // Menerima:
-//   - userRepo  : implementasi UserRepository (bisa mock saat testing)
-//   - jwtSecret : string rahasia untuk sign JWT, misalnya dari config
-//   - jwtTTL    : durasi masa berlaku token, misalnya 24 * time.Hour
-//   - rdb       : client redis untuk manipulasi state JWT (pembatalan/logout)
 func NewUserService(
 	userRepo repository.UserRepository,
 	jwtSecret string,
@@ -91,19 +78,10 @@ func NewUserService(
 }
 
 // Register menangani pendaftaran anggota koperasi baru.
-//
 // Urutan langkah:
-//  1. Hash password dengan bcrypt (cost 12 — keseimbangan keamanan vs performa).
-//  2. Simpan user ke database melalui repository.
-//  3. Generate JWT dan kembalikan bersama data user.
-//
-// Jika email sudah terdaftar, repository mengembalikan ErrEmailAlreadyExists yang
-// kemudian kita wrap agar handler bisa memberi respons 409 Conflict.
 func (s *userService) Register(ctx context.Context, req model.RegisterRequest) (*model.AuthResponse, error) {
 	// Langkah 1: Hash password.
 	// bcrypt.DefaultCost = 10. Kita naikkan ke 12 untuk resistansi brute-force
-	// lebih baik; di server modern ini memakan ~250ms — masih acceptable untuk
-	// operasi registrasi yang tidak terjadi setiap detik.
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		return nil, fmt.Errorf("hashing password gagal: %w", err)
@@ -139,16 +117,7 @@ func (s *userService) Register(ctx context.Context, req model.RegisterRequest) (
 }
 
 // Login memverifikasi kredensial anggota koperasi.
-//
 // Urutan langkah:
-//  1. Cari user berdasarkan email.
-//  2. Bandingkan password yang dikirim dengan hash di database menggunakan bcrypt.
-//  3. Generate JWT dan kembalikan bersama data user.
-//
-// Catatan keamanan: baik email-tidak-ada maupun password-salah mengembalikan
-// error yang SAMA (ErrInvalidCredentials). Ini disengaja — response berbeda bisa
-// dipakai penyerang untuk memastikan apakah sebuah email terdaftar atau tidak
-// (user enumeration attack).
 func (s *userService) Login(ctx context.Context, req model.LoginRequest) (*model.AuthResponse, error) {
 	// Langkah 1: Cari user berdasarkan email.
 	user, err := s.userRepo.FindByEmail(ctx, req.Email)
@@ -168,9 +137,6 @@ func (s *userService) Login(ctx context.Context, req model.LoginRequest) (*model
 
 	// Langkah 3: Validasi status akun.
 	// Pemeriksaan ini dilakukan SETELAH verifikasi password berhasil.
-	// Mengapa setelah? Agar waktu respons untuk email-tidak-ada, password-salah,
-	// dan akun-suspended tidak bisa dibedakan dari sisi waktu (timing attack).
-	// Akun harus berstatus 'active' — 'inactive' dan 'banned' tidak diizinkan login.
 	if user.Status != "active" {
 		return nil, ErrAccountSuspended
 	}
@@ -189,11 +155,6 @@ func (s *userService) Login(ctx context.Context, req model.LoginRequest) (*model
 
 // GetProfile mengambil data profil user berdasarkan userID yang sudah diverifikasi
 // oleh middleware JWT.
-//
-// Fungsi ini sengaja dibuat tipis: tidak ada logika bisnis ekstra di sini karena
-// pengambilan profil murni operasi read. Lapisan service tetap dipertahankan agar
-// jika di masa depan ada aturan bisnis (misal: menyembunyikan profil user yang
-// diblokir), cukup tambahkan di sini tanpa menyentuh handler atau repository.
 func (s *userService) GetProfile(ctx context.Context, userID int64) (*model.User, error) {
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil {
@@ -215,7 +176,6 @@ func (s *userService) GetProfile(ctx context.Context, userID int64) (*model.User
 
 // Logout menyimpan token ke dalam Redis blocklist.
 // Token akan kedaluwarsa sesuai waktu JWTTTL server sehingga ruang Redis
-// dibebaskan otomatis secara sinkron dengan matinya validitas token mandiri.
 func (s *userService) Logout(ctx context.Context, tokenStr string) error {
 	key := "jwt_revoked:" + tokenStr
 	err := s.rdb.SetEx(ctx, key, "revoked", s.jwtTTL).Err()
@@ -226,14 +186,7 @@ func (s *userService) Logout(ctx context.Context, tokenStr string) error {
 }
 
 // generateToken membuat JWT yang ditandatangani dengan HMAC-SHA256 (HS256).
-//
 // Payload (claims) berisi:
-//   - user_id & email : data user untuk keperluan middleware autentikasi.
-//   - exp             : waktu kadaluarsa token.
-//   - iat             : waktu token diterbitkan.
-//
-// Token ditandatangani dengan jwtSecret — JANGAN simpan secret ini di kode,
-// selalu baca dari environment variable.
 func (s *userService) generateToken(user *model.User) (string, error) {
 	now := time.Now()
 

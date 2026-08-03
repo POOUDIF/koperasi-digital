@@ -15,7 +15,6 @@ type Simpanan struct {
 
 // TransaksiSimpanan mencatat setiap mutasi saldo: setor atau tarik.
 // Tabel ini adalah "buku besar" — TIDAK BOLEH diubah setelah commit,
-// hanya boleh ditambah (insert-only / append-only).
 type TransaksiSimpanan struct {
 	ID         int64     `db:"id"          json:"id"`
 	SimpananID int64     `db:"simpanan_id" json:"simpanan_id"`

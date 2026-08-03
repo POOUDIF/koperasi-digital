@@ -1,14 +1,5 @@
 // Package database — inisialisasi dan manajemen koneksi Redis.
-//
 // Posisi dalam arsitektur:
-//
-//	main.go
-//	  ├── database.New(cfg.DB)         → koneksi PostgreSQL
-//	  └── database.NewRedisClient(...)  → koneksi Redis
-//	          ↓
-//	      GoldRepository  (caching harga emas)
-//	      GoldService     (push ke message queue)
-//	      GoldWorker      (consume dari message queue)
 package database
 
 import (
@@ -21,15 +12,7 @@ import (
 )
 
 // NewRedisClient membuat dan memvalidasi koneksi ke server Redis.
-//
 // Parameter:
-//   - addr : alamat Redis dalam format "host:port", contoh "localhost:6379".
-//
-// Fungsi ini memanggil Ping (dengan timeout 5 detik) untuk memastikan Redis
-// benar-benar dapat dijangkau sebelum aplikasi mulai menerima request.
-//
-// Caller wajib memanggil client.Close() saat aplikasi berhenti untuk memastikan
-// semua koneksi di-release dengan bersih.
 func NewRedisClient(addr string) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr: addr,

@@ -1,12 +1,5 @@
 // Package handler berisi HTTP handler — titik masuk request dari client.
-//
 // Tanggung jawab handler:
-//  1. Membaca dan memvalidasi input HTTP (body, query, header).
-//  2. Memanggil service yang tepat.
-//  3. Menerjemahkan hasil/error service menjadi HTTP response.
-//
-// Handler TIDAK boleh berisi logika bisnis. Ia hanya jembatan antara
-// protokol HTTP dan logika domain di service layer.
 package handler
 
 import (
@@ -38,19 +31,7 @@ type errorResponse struct {
 }
 
 // Register menangani POST /api/v1/register.
-//
 // Request body (JSON):
-//
-//	{ "nama_lengkap": "Budi Santoso", "email": "budi@koperasi.id", "password": "rahasia123" }
-//
-// Response sukses (201 Created):
-//
-//	{ "token": "<jwt>", "user": { "id": 1, "nama_lengkap": "...", "email": "...", ... } }
-//
-// Response gagal:
-//   - 400 Bad Request  : body tidak valid / field wajib kosong
-//   - 409 Conflict     : email sudah terdaftar
-//   - 500 Internal     : error tak terduga di server
 func (h *UserHandler) Register(c *gin.Context) {
 	var req model.RegisterRequest
 
@@ -79,19 +60,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 }
 
 // Login menangani POST /api/v1/login.
-//
 // Request body (JSON):
-//
-//	{ "email": "budi@koperasi.id", "password": "rahasia123" }
-//
-// Response sukses (200 OK):
-//
-//	{ "token": "<jwt>", "user": { "id": 1, "nama_lengkap": "...", "email": "...", ... } }
-//
-// Response gagal:
-//   - 400 Bad Request  : body tidak valid
-//   - 401 Unauthorized : email/password salah
-//   - 500 Internal     : error tak terduga di server
 func (h *UserHandler) Login(c *gin.Context) {
 	var req model.LoginRequest
 
@@ -122,19 +91,6 @@ func (h *UserHandler) Login(c *gin.Context) {
 
 // GetProfile menangani GET /api/v1/profile.
 // Route ini dilindungi oleh middleware.RequireAuth — request yang sampai ke sini
-// sudah dipastikan membawa JWT yang valid.
-//
-// Response sukses (200 OK):
-//
-//	{ "id": 1, "nama_lengkap": "Budi Santoso", "email": "budi@koperasi.id", ... }
-//
-// Perhatikan: PasswordHash tidak ikut terkirim karena field tersebut memiliki
-// tag `json:"-"` pada struct model.User.
-//
-// Response gagal:
-//   - 401 Unauthorized : user_id tidak ada di context (middleware tidak berjalan)
-//   - 404 Not Found    : akun dihapus setelah token diterbitkan
-//   - 500 Internal     : error tak terduga di server
 func (h *UserHandler) GetProfile(c *gin.Context) {
 	// Ambil user_id yang sudah disematkan oleh middleware.RequireAuth.
 	// c.Get mengembalikan (value any, exists bool) — kita periksa keduanya.
@@ -142,7 +98,6 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 	if !exists {
 		// Kondisi ini tidak seharusnya terjadi jika middleware dipasang dengan benar,
 		// tapi kita tangani secara defensif agar bug konfigurasi tidak menyebabkan
-		// data user lain bocor.
 		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid, silakan login kembali"})
 		return
 	}
@@ -178,9 +133,6 @@ func (h *UserHandler) GetProfile(c *gin.Context) {
 
 // Logout menangani POST /api/v1/logout.
 // Route ini dilindungi oleh middleware.RequireAuth.
-//
-// Menyimpan raw JWT ke dalam memori Redis sehingga tidak bisa digunakan ulang
-// meskipun belum kadaluarsa.
 func (h *UserHandler) Logout(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" {

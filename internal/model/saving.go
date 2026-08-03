@@ -1,18 +1,11 @@
 // Package model mendefinisikan struct domain untuk fitur simpanan syariah.
-//
 // Tiga entitas utama:
-//   - SavingsProduct   : Produk simpanan (Wadiah / Mudharabah).
-//   - SavingsAccount   : Rekening simpanan milik seorang anggota.
-//   - SavingsTransaction: Buku besar mutasi saldo (append-only).
 package model
 
 import "time"
 
 // SavingsProduct merepresentasikan produk simpanan yang ditawarkan koperasi.
-//
 // Akad yang didukung:
-//   - "Wadiah"     : Dana titipan. Koperasi menjaga amanah, tidak wajib memberi bagi hasil.
-//   - "Mudharabah" : Bagi hasil. Keuntungan dibagi sesuai nisbah di profit_sharing_ratio.
 type SavingsProduct struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -27,7 +20,6 @@ type SavingsProduct struct {
 
 	// ProfitSharingRatio adalah nisbah bagi hasil untuk anggota (0.00 – 1.00).
 	// Contoh: 0.60 berarti 60% keuntungan pengelolaan menjadi hak anggota.
-	// Untuk akad Wadiah, nilai ini biasanya 0.
 	ProfitSharingRatio float64 `db:"profit_sharing_ratio" json:"profit_sharing_ratio"`
 
 	// IsMandatory menandakan apakah simpanan ini wajib bagi semua anggota.
@@ -38,10 +30,7 @@ type SavingsProduct struct {
 }
 
 // SavingsAccount merepresentasikan rekening simpanan milik seorang anggota.
-//
 // Saldo (Balance) hanya boleh diubah melalui operasi atomik di repository layer
-// (fungsi Deposit/Withdraw) yang menjamin balance dan savings_transactions
-// selalu konsisten satu sama lain.
 type SavingsAccount struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -63,10 +52,7 @@ type SavingsAccount struct {
 }
 
 // SavingsTransaction adalah catatan satu mutasi saldo (deposit atau withdraw).
-//
 // PENTING — APPEND-ONLY: Baris di tabel ini adalah audit trail keuangan syariah.
-// Setelah di-commit ke database, baris TIDAK BOLEH diubah atau dihapus.
-// Koreksi dilakukan dengan insert baris pembalik (reversal entry), bukan UPDATE.
 type SavingsTransaction struct {
 	ID int64 `db:"id" json:"id"`
 
@@ -90,7 +76,6 @@ type SavingsTransaction struct {
 
 // =============================================================================
 // Request/Response Structs — Payload HTTP untuk modul simpanan
-// =============================================================================
 
 // OpenAccountRequest adalah payload JSON untuk POST /api/v1/savings/accounts.
 // Anggota memilih produk simpanan mana yang ingin dibuka.

@@ -1,10 +1,5 @@
 // Package repository — implementasi FinancingRepository untuk PostgreSQL.
-//
 // Pola identik dengan UserRepository dan SavingRepository:
-//
-//	FinancingRepository (interface)  ← service layer bergantung ke sini
-//	    ↑
-//	postgresFinancingRepository (struct)  ← implementasi konkret dengan *sql.DB
 package repository
 
 import (
@@ -33,7 +28,6 @@ var (
 
 	// ErrInstallmentAlreadyPaid dikembalikan saat mencoba membayar cicilan yang
 	// sudah berstatus 'paid'. Bisa terjadi sebagai race condition (dua request
-	// bersamaan) — DB transaction memastikan hanya satu yang berhasil.
 	ErrInstallmentAlreadyPaid = errors.New("cicilan sudah dibayar sebelumnya")
 
 	// ErrInsufficientBalance dikembalikan saat saldo rekening simpanan tidak cukup
@@ -62,9 +56,6 @@ type FinancingRepository interface {
 
 	// ApproveWithInstallments mengeksekusi approval secara ATOMIK dalam satu
 	// database transaction:
-	//   1. UPDATE status financing → 'approved' + catat reviewer.
-	//   2. INSERT semua baris jadwal angsuran ke financing_installments.
-	// Jika salah satu langkah gagal, seluruh operasi di-rollback.
 	ApproveWithInstallments(ctx context.Context, financingID int64, reviewedBy int64, installments []model.FinancingInstallment) error
 
 	// GetInstallmentsByFinancingID mengambil semua baris angsuran milik satu pengajuan,
@@ -77,14 +68,6 @@ type FinancingRepository interface {
 
 	// PayInstallment mengeksekusi pembayaran satu cicilan secara ATOMIK dalam satu
 	// database transaction:
-	//   a. SELECT ... FOR UPDATE pada savings_accounts — kunci baris, validasi
-	//      kepemilikan (user_id), status rekening, dan kecukupan saldo.
-	//   b. UPDATE savings_accounts — kurangi balance sebesar amountDue.
-	//   c. INSERT savings_transactions — catat mutasi debit (type: 'withdraw').
-	//   d. UPDATE financing_installments — set status='paid', amount_paid, paid_at.
-	//   e. Jika semua cicilan lunas → UPDATE financing status='paid'.
-	// Mengembalikan ErrInsufficientBalance, ErrSavingsAccountNotFound,
-	// ErrAccountNotActive, atau ErrInstallmentAlreadyPaid sesuai kondisi.
 	PayInstallment(ctx context.Context, installmentID int64, financingID int64, amountDue float64, accountID int64, userID int64) error
 }
 
@@ -101,7 +84,6 @@ func NewFinancingRepository(db *sql.DB) FinancingRepository {
 
 // scanFinancing adalah helper untuk meng-Scan satu baris financing ke struct.
 // Dipusatkan di sini agar semua query (FindByID, FindByUserID, dsb.) menggunakan
-// urutan kolom yang identik — mudah di-maintain jika skema berubah.
 func scanFinancing(row interface {
 	Scan(dest ...any) error
 }, f *model.Financing) error {
@@ -125,9 +107,7 @@ const financingSelectColumns = `
 `
 
 // CreateFinancing menyimpan pengajuan pembiayaan baru ke tabel `financing`.
-//
 // Kolom yang di-insert dari application: semua field bisnis.
-// Kolom yang di-generate database: id, created_at (via RETURNING).
 func (r *postgresFinancingRepository) CreateFinancing(ctx context.Context, f *model.Financing) (*model.Financing, error) {
 	query := `
 		INSERT INTO financing (
@@ -208,10 +188,7 @@ func (r *postgresFinancingRepository) FindByUserID(ctx context.Context, userID i
 }
 
 // UpdateStatus memperbarui status dan menyimpan data reviewer pada satu pengajuan.
-//
 // Digunakan untuk operasi sederhana yang tidak menghasilkan data turunan,
-// yaitu penolakan (reject). Untuk persetujuan (approve), gunakan ApproveWithInstallments
-// yang menjalankan update status + insert angsuran dalam satu database transaction.
 func (r *postgresFinancingRepository) UpdateStatus(ctx context.Context, id int64, status string, reviewedBy int64) error {
 	query := `
 		UPDATE financing
@@ -235,20 +212,7 @@ func (r *postgresFinancingRepository) UpdateStatus(ctx context.Context, id int64
 }
 
 // ApproveWithInstallments mengeksekusi persetujuan pembiayaan secara ATOMIK.
-//
 // Kenapa harus database transaction?
-// Approval melibatkan dua tabel: UPDATE di `financing` dan multiple INSERT di
-// `financing_installments`. Jika proses terhenti di tengah jalan (crash server,
-// koneksi putus), partial state akan membuat pembiayaan "approved" tapi tidak
-// punya jadwal angsuran — data tidak konsisten yang sangat berbahaya di sistem
-// keuangan syariah.
-//
-// Dengan satu database transaction, keduanya berhasil atau keduanya batal.
-//
-// Urutan operasi di dalam transaction:
-//  1. UPDATE status financing → 'approved', catat reviewed_by + reviewed_at.
-//  2. INSERT satu baris per angsuran ke financing_installments.
-//  3. COMMIT — hanya jika kedua langkah berhasil.
 func (r *postgresFinancingRepository) ApproveWithInstallments(
 	ctx context.Context,
 	financingID int64,
@@ -281,7 +245,6 @@ func (r *postgresFinancingRepository) ApproveWithInstallments(
 
 	// Langkah 2: Insert semua baris angsuran.
 	// Kita prepare statement sekali dan eksekusi berkali-kali — lebih efisien
-	// daripada membuat query string baru setiap iterasi (terutama untuk tenor panjang).
 	insertQuery := `
 		INSERT INTO financing_installments
 			(financing_id, installment_number, amount_due, amount_paid, due_date, status)
@@ -315,7 +278,6 @@ func (r *postgresFinancingRepository) ApproveWithInstallments(
 
 // =============================================================================
 // Installment helpers
-// =============================================================================
 
 // installmentSelectColumns adalah urutan kolom yang konsisten untuk semua
 // query yang meng-SELECT dari financing_installments.
@@ -339,7 +301,6 @@ func scanInstallment(row interface {
 
 // GetInstallmentsByFinancingID mengambil semua cicilan milik satu pengajuan,
 // diurutkan dari angsuran pertama ke terakhir (installment_number ASC).
-// Mengembalikan slice kosong (bukan nil) jika tidak ada cicilan.
 func (r *postgresFinancingRepository) GetInstallmentsByFinancingID(ctx context.Context, financingID int64) ([]model.FinancingInstallment, error) {
 	query := `SELECT` + installmentSelectColumns + `FROM financing_installments WHERE financing_id = $1 ORDER BY installment_number ASC`
 
@@ -381,21 +342,7 @@ func (r *postgresFinancingRepository) GetInstallmentByID(ctx context.Context, id
 }
 
 // PayInstallment mengeksekusi pembayaran satu cicilan secara ATOMIK.
-//
 // Kenapa satu transaction yang menyentuh dua modul (simpanan & pembiayaan)?
-// Jika kita memisahkan menjadi dua operasi berbeda, ada jendela waktu di mana
-// saldo sudah berkurang tapi cicilan belum tercatat sebagai 'paid' (atau sebaliknya).
-// Dengan satu DB transaction, keduanya berhasil bersama atau keduanya dibatalkan.
-//
-// Urutan operasi:
-//
-//	a. SELECT ... FOR UPDATE pada savings_accounts — kunci baris, validasi user_id,
-//	   status, dan kecukupan saldo.
-//	b. UPDATE savings_accounts — kurangi balance sebesar amountDue.
-//	c. INSERT savings_transactions — log debit (withdraw) dengan reference "cicilan_{id}".
-//	d. UPDATE financing_installments — set status='paid', amount_paid, paid_at=NOW().
-//	   Klausa AND status='unpaid' mencegah double-payment jika ada race condition.
-//	e. Hitung sisa cicilan unpaid; jika 0 → UPDATE financing status='paid'.
 func (r *postgresFinancingRepository) PayInstallment(
 	ctx context.Context,
 	installmentID int64,
@@ -411,9 +358,7 @@ func (r *postgresFinancingRepository) PayInstallment(
 	defer tx.Rollback() //nolint:errcheck
 
 	// --- a. Kunci rekening simpanan & validasi ---
-	//
 	// FOR UPDATE mengunci baris agar tidak ada transaksi lain yang membaca
-	// saldo lama dan membuat double-spend di rekening yang sama.
 	var accUserID int64
 	var balance float64
 	var accStatus string
@@ -468,10 +413,7 @@ func (r *postgresFinancingRepository) PayInstallment(
 	}
 
 	// --- d. Update status cicilan → 'paid' ---
-	//
 	// AND status='unpaid' pada WHERE memberikan proteksi ekstra terhadap race condition:
-	// jika dua request membayar cicilan yang sama secara bersamaan, hanya satu yang
-	// berhasil mengubah baris (yang lain mendapat affected=0).
 	updateInstallmentQuery := `
 		UPDATE financing_installments
 		SET    status      = 'paid',
