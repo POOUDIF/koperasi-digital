@@ -125,3 +125,15 @@ func (h *SavingHandler) Deposit(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "setoran berhasil"})
 }
+
+// GetAllTransactions menangani GET /api/v1/admin/transactions/saving.
+// Mengembalikan daftar semua log transaksi simpanan (untuk admin).
+func (h *SavingHandler) GetAllTransactions(c *gin.Context) {
+	txs, err := h.savingService.GetAllTransactions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil daftar semua log simpanan"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"transactions": txs})
+}

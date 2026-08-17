@@ -114,3 +114,15 @@ func (h *GoldHandler) SellGold(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, goldTx)
 }
+
+// GetAllTransactions menangani GET /api/v1/admin/transactions/gold.
+// Mengembalikan daftar semua transaksi emas (untuk admin).
+func (h *GoldHandler) GetAllTransactions(c *gin.Context) {
+	txs, err := h.goldService.GetAllTransactions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil daftar semua transaksi emas"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"transactions": txs})
+}

@@ -69,6 +69,9 @@ type FinancingRepository interface {
 	// PayInstallment mengeksekusi pembayaran satu cicilan secara ATOMIK dalam satu
 	// database transaction:
 	PayInstallment(ctx context.Context, installmentID int64, financingID int64, amountDue float64, accountID int64, userID int64) error
+
+	// GetAllFinancings mengambil semua pengajuan pembiayaan dari semua user.
+	GetAllFinancings(ctx context.Context) ([]model.Financing, error)
 }
 
 // postgresFinancingRepository adalah implementasi konkret dengan PostgreSQL.
@@ -168,6 +171,32 @@ func (r *postgresFinancingRepository) FindByUserID(ctx context.Context, userID i
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("query daftar pembiayaan gagal: %w", err)
+	}
+	defer rows.Close()
+
+	financings := make([]model.Financing, 0)
+	for rows.Next() {
+		var f model.Financing
+		if err := scanFinancing(rows, &f); err != nil {
+			return nil, fmt.Errorf("scan data pembiayaan gagal: %w", err)
+		}
+		financings = append(financings, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi data pembiayaan gagal: %w", err)
+	}
+
+	return financings, nil
+}
+
+// GetAllFinancings mengambil semua pengajuan pembiayaan dari semua user.
+func (r *postgresFinancingRepository) GetAllFinancings(ctx context.Context) ([]model.Financing, error) {
+	query := `SELECT` + financingSelectColumns + `FROM financing ORDER BY created_at DESC`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query daftar semua pembiayaan gagal: %w", err)
 	}
 	defer rows.Close()
 

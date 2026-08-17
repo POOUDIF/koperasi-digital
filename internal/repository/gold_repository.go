@@ -66,6 +66,9 @@ type GoldRepository interface {
 	// RefundFailedTransaction menjalankan proses refund saldo secara ATOMIK
 	// dalam satu DB transaction ketika transaksi on-chain di-revert oleh EVM.
 	RefundFailedTransaction(ctx context.Context, goldTxID int64) error
+
+	// GetAllTransactions mengambil semua transaksi emas (untuk admin).
+	GetAllTransactions(ctx context.Context) ([]model.GoldTransaction, error)
 }
 
 // postgresGoldRepository adalah implementasi konkret dengan PostgreSQL + Redis.
@@ -423,6 +426,40 @@ func (r *postgresGoldRepository) FindProcessing(ctx context.Context) ([]model.Go
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterasi rows transaksi processing gagal: %w", err)
+	}
+
+	return txs, nil
+}
+
+// GetAllTransactions mengambil semua transaksi emas.
+func (r *postgresGoldRepository) GetAllTransactions(ctx context.Context) ([]model.GoldTransaction, error) {
+	query := `
+		SELECT id, user_id, type, gram_amount, price_per_gram,
+		       total_rupiah, tx_hash, status, created_at
+		FROM   gold_transactions
+		ORDER  BY created_at DESC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query semua transaksi emas gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var txs []model.GoldTransaction
+	for rows.Next() {
+		var t model.GoldTransaction
+		if err := rows.Scan(
+			&t.ID, &t.UserID, &t.Type, &t.GramAmount, &t.PricePerGram,
+			&t.TotalRupiah, &t.TxHash, &t.Status, &t.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaksi emas gagal: %w", err)
+		}
+		txs = append(txs, t)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi rows transaksi emas gagal: %w", err)
 	}
 
 	return txs, nil

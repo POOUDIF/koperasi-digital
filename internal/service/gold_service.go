@@ -38,6 +38,9 @@ type GoldService interface {
 
 	// SellGold memproses penjualan emas oleh anggota.
 	SellGold(ctx context.Context, userID int64, req model.SellGoldRequest) (*model.GoldTransaction, error)
+
+	// GetAllTransactions mengambil semua transaksi emas dari semua user.
+	GetAllTransactions(ctx context.Context) ([]model.GoldTransaction, error)
 }
 
 // goldService adalah implementasi konkret GoldService.
@@ -149,4 +152,13 @@ func (s *goldService) SellGold(ctx context.Context, userID int64, req model.Sell
 	}
 
 	return goldTx, nil
+}
+
+// GetAllTransactions mengambil semua transaksi emas dari semua user.
+func (s *goldService) GetAllTransactions(ctx context.Context) ([]model.GoldTransaction, error) {
+	txs, err := s.goldRepo.GetAllTransactions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mengambil daftar semua transaksi emas gagal: %w", err)
+	}
+	return txs, nil
 }

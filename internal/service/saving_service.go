@@ -41,6 +41,9 @@ type SavingService interface {
 	// DepositFund menyetor dana ke rekening simpanan.
 	// Memvalidasi kepemilikan rekening, status rekening, dan nominal minimum.
 	DepositFund(ctx context.Context, userID int64, req model.DepositRequest) error
+
+	// GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
+	GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error)
 }
 
 // savingService adalah implementasi konkret SavingService.
@@ -136,4 +139,13 @@ func (s *savingService) DepositFund(ctx context.Context, userID int64, req model
 	}
 
 	return nil
+}
+
+// GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
+func (s *savingService) GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error) {
+	txs, err := s.savingRepo.GetAllTransactions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mengambil daftar semua transaksi simpanan gagal: %w", err)
+	}
+	return txs, nil
 }

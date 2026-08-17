@@ -36,6 +36,9 @@ type UserRepository interface {
 	// FindByID mencari user berdasarkan primary key.
 	// Mengembalikan ErrUserNotFound jika tidak ada.
 	FindByID(ctx context.Context, id int64) (*model.User, error)
+
+	// GetAll mengambil semua data user dari database.
+	GetAll(ctx context.Context) ([]model.User, error)
 }
 
 // postgresUserRepository adalah implementasi UserRepository yang menggunakan PostgreSQL.
@@ -139,4 +142,44 @@ func (r *postgresUserRepository) FindByEmail(ctx context.Context, email string) 
 	}
 
 	return user, nil
+}
+
+// GetAll mengambil semua baris dari tabel users.
+func (r *postgresUserRepository) GetAll(ctx context.Context) ([]model.User, error) {
+	query := `
+		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at
+		FROM   users
+		ORDER BY created_at DESC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query all users gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var users []model.User
+	for rows.Next() {
+		var u model.User
+		if err := rows.Scan(
+			&u.ID,
+			&u.NamaLengkap,
+			&u.Email,
+			&u.PasswordHash,
+			&u.Role,
+			&u.WalletAddress,
+			&u.Status,
+			&u.CreatedAt,
+			&u.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan user gagal: %w", err)
+		}
+		users = append(users, u)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi users gagal: %w", err)
+	}
+
+	return users, nil
 }

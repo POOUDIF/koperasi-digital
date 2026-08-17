@@ -43,6 +43,9 @@ type SavingRepository interface {
 	// Deposit mengeksekusi setoran dana secara ATOMIK menggunakan database transaction:
 	// 1. Validasi rekening (status harus 'active') + kunci baris dengan FOR UPDATE.
 	Deposit(ctx context.Context, accountID int64, amount float64, referenceID string) error
+
+	// GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
+	GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error)
 }
 
 // postgresSavingRepository adalah implementasi SavingRepository dengan PostgreSQL.
@@ -237,4 +240,36 @@ func (r *postgresSavingRepository) Deposit(ctx context.Context, accountID int64,
 	}
 
 	return nil
+}
+
+// GetAllTransactions mengambil semua transaksi dari tabel savings_transactions.
+func (r *postgresSavingRepository) GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error) {
+	query := `
+		SELECT id, savings_account_id, type, amount, reference_id, created_at
+		FROM   savings_transactions
+		ORDER  BY created_at DESC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query semua transaksi simpanan gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var txs []model.SavingsTransaction
+	for rows.Next() {
+		var t model.SavingsTransaction
+		if err := rows.Scan(
+			&t.ID, &t.SavingsAccountID, &t.Type, &t.Amount, &t.ReferenceID, &t.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaksi simpanan gagal: %w", err)
+		}
+		txs = append(txs, t)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi rows transaksi simpanan gagal: %w", err)
+	}
+
+	return txs, nil
 }

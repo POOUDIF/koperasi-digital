@@ -51,6 +51,9 @@ type UserService interface {
 
 	// Logout memasukkan token aktif ke dalam Redis blocklist.
 	Logout(ctx context.Context, tokenStr string) error
+
+	// GetAllUsers mengambil semua pengguna terdaftar (untuk super admin).
+	GetAllUsers(ctx context.Context) ([]model.User, error)
 }
 
 // userService adalah implementasi konkret UserService.
@@ -183,6 +186,15 @@ func (s *userService) Logout(ctx context.Context, tokenStr string) error {
 		return fmt.Errorf("gagal memblokir token pada memori: %w", err)
 	}
 	return nil
+}
+
+// GetAllUsers mengambil daftar semua pengguna dari repository.
+func (s *userService) GetAllUsers(ctx context.Context) ([]model.User, error) {
+	users, err := s.userRepo.GetAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mengambil semua pengguna gagal: %w", err)
+	}
+	return users, nil
 }
 
 // generateToken membuat JWT yang ditandatangani dengan HMAC-SHA256 (HS256).

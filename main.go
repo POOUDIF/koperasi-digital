@@ -258,6 +258,12 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		{
 			// Review pengajuan pembiayaan: approve atau reject.
 			admin.PUT("/financing/:id/review", financingH.Review)
+			
+			// Dashboard super admin: melihat semua data dan transaksi.
+			admin.GET("/users", userH.GetAllUsers)
+			admin.GET("/transactions/financing", financingH.GetAllFinancings)
+			admin.GET("/transactions/gold", goldH.GetAllTransactions)
+			admin.GET("/transactions/saving", savingH.GetAllTransactions)
 		}
 	}
 

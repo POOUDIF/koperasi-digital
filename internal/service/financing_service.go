@@ -62,6 +62,9 @@ type FinancingService interface {
 	// PayMyInstallment memproses pembayaran satu cicilan oleh anggota.
 	// Validasi yang dilakukan (secara berurutan):
 	PayMyInstallment(ctx context.Context, userID int64, installmentID int64, req model.PayInstallmentRequest) error
+
+	// GetAllFinancings mengambil semua pengajuan pembiayaan dari semua user.
+	GetAllFinancings(ctx context.Context) ([]model.Financing, error)
 }
 
 // financingService adalah implementasi konkret FinancingService.
@@ -132,6 +135,15 @@ func (s *financingService) GetMyFinancings(ctx context.Context, userID int64) ([
 		return nil, fmt.Errorf("mengambil daftar pembiayaan gagal: %w", err)
 	}
 
+	return financings, nil
+}
+
+// GetAllFinancings mengambil semua pengajuan pembiayaan dari semua user.
+func (s *financingService) GetAllFinancings(ctx context.Context) ([]model.Financing, error) {
+	financings, err := s.financingRepo.GetAllFinancings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("mengambil daftar semua pembiayaan gagal: %w", err)
+	}
 	return financings, nil
 }
 

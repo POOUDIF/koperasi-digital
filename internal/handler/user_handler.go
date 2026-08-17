@@ -153,3 +153,16 @@ func (h *UserHandler) Logout(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "logout berhasil"})
 }
+
+// GetAllUsers menangani GET /api/v1/admin/users.
+// Route ini dilindungi oleh middleware.RequireAuth dan middleware.RequireRole.
+func (h *UserHandler) GetAllUsers(c *gin.Context) {
+	users, err := h.userService.GetAllUsers(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil daftar pengguna"})
+		return
+	}
+
+	// Bungkus dalam object "users" agar konsisten dengan endpoint lain
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}

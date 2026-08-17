@@ -190,3 +190,15 @@ func (h *FinancingHandler) PayInstallment(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "pembayaran cicilan berhasil"})
 }
+
+// GetAllFinancings menangani GET /api/v1/admin/transactions/financing.
+// Mengembalikan daftar semua pembiayaan (untuk admin).
+func (h *FinancingHandler) GetAllFinancings(c *gin.Context) {
+	financings, err := h.financingService.GetAllFinancings(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil daftar semua pembiayaan"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"financings": financings})
+}
