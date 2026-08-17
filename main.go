@@ -204,7 +204,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 	goldSvc := service.NewGoldService(goldRepo, rdb)
 
 	// Layer 3: Handler — tahu tentang Service (via interface), bukan Repository
-	userH := handler.NewUserHandler(userSvc)
+	userH := handler.NewUserHandler(userSvc, savingSvc)
 	savingH := handler.NewSavingHandler(savingSvc)
 	financingH := handler.NewFinancingHandler(financingSvc)
 	goldH := handler.NewGoldHandler(goldSvc)
@@ -231,6 +231,8 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		)
 		{
 			protected.GET("/profile", userH.GetProfile)
+			protected.GET("/profile/kyc", userH.GetKYC)
+			protected.PUT("/profile/kyc", userH.UpdateKYC)
 			protected.POST("/logout", userH.Logout)
 
 			// --- Modul Simpanan Syariah ---

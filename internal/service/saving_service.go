@@ -35,6 +35,9 @@ type SavingService interface {
 	// Memvalidasi bahwa produk simpanan yang dipilih ada di database.
 	OpenAccount(ctx context.Context, userID int64, req model.OpenAccountRequest) (*model.SavingsAccount, error)
 
+	// OpenMandatoryAccounts dipanggil saat registrasi untuk membuat rekening Simpanan Pokok & Wajib secara otomatis.
+	OpenMandatoryAccounts(ctx context.Context, userID int64) error
+
 	// GetAccounts mengambil semua rekening simpanan milik user.
 	GetAccounts(ctx context.Context, userID int64) ([]model.SavingsAccount, error)
 
@@ -81,6 +84,30 @@ func (s *savingService) OpenAccount(ctx context.Context, userID int64, req model
 	}
 
 	return saved, nil
+}
+
+// OpenMandatoryAccounts membuat rekening untuk semua produk simpanan yang wajib.
+// Dipanggil oleh UserHandler secara asinkron atau sinkron setelah registrasi.
+func (s *savingService) OpenMandatoryAccounts(ctx context.Context, userID int64) error {
+	products, err := s.savingRepo.GetMandatoryProducts(ctx)
+	if err != nil {
+		return fmt.Errorf("gagal mengambil produk mandatory: %w", err)
+	}
+
+	for _, p := range products {
+		account := &model.SavingsAccount{
+			UserID:           userID,
+			SavingsProductID: p.ID,
+		}
+		// CreateAccount akan otomatis membuat rekening dengan balance 0.
+		_, err := s.savingRepo.CreateAccount(ctx, account)
+		if err != nil {
+			// Kita bisa return error, tapi jika salah satu gagal, mungkin kita
+			// tidak ingin me-rollback semuanya. Namun untuk sekarang kita return error.
+			return fmt.Errorf("gagal membuat rekening mandatory %s: %w", p.Name, err)
+		}
+	}
+	return nil
 }
 
 // GetAccounts mengambil semua rekening simpanan milik user yang sedang login.

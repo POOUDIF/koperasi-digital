@@ -20,6 +20,9 @@ var ErrUserNotFound = errors.New("user tidak ditemukan")
 // ErrEmailAlreadyExists dikembalikan saat mencoba menyimpan email yang sudah terdaftar.
 var ErrEmailAlreadyExists = errors.New("email sudah terdaftar")
 
+// ErrProfileNotFound dikembalikan saat profil KYC belum diisi.
+var ErrProfileNotFound = errors.New("profil tidak ditemukan")
+
 // pgUniqueViolation adalah kode error PostgreSQL untuk pelanggaran unique constraint.
 const pgUniqueViolation = "23505"
 
@@ -39,6 +42,12 @@ type UserRepository interface {
 
 	// GetAll mengambil semua data user dari database.
 	GetAll(ctx context.Context) ([]model.User, error)
+
+	// UpsertProfile menyimpan atau memperbarui profil KYC user.
+	UpsertProfile(ctx context.Context, profile *model.UserProfile) error
+
+	// GetProfileByUserID mengambil data KYC user.
+	GetProfileByUserID(ctx context.Context, userID int64) (*model.UserProfile, error)
 }
 
 // postgresUserRepository adalah implementasi UserRepository yang menggunakan PostgreSQL.
@@ -182,4 +191,62 @@ func (r *postgresUserRepository) GetAll(ctx context.Context) ([]model.User, erro
 	}
 
 	return users, nil
+}
+
+// UpsertProfile melakukan insert atau update data profil pengguna (KYC).
+// Memanfaatkan ON CONFLICT DO UPDATE dari PostgreSQL.
+func (r *postgresUserRepository) UpsertProfile(ctx context.Context, p *model.UserProfile) error {
+	query := `
+		INSERT INTO user_profiles (
+			user_id, nik, phone_number, address, job_title, 
+			monthly_income, emergency_contact_name, emergency_contact_phone
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (user_id) DO UPDATE SET
+			nik = EXCLUDED.nik,
+			phone_number = EXCLUDED.phone_number,
+			address = EXCLUDED.address,
+			job_title = EXCLUDED.job_title,
+			monthly_income = EXCLUDED.monthly_income,
+			emergency_contact_name = EXCLUDED.emergency_contact_name,
+			emergency_contact_phone = EXCLUDED.emergency_contact_phone,
+			updated_at = NOW()
+	`
+
+	_, err := r.db.ExecContext(ctx, query,
+		p.UserID, p.NIK, p.PhoneNumber, p.Address, p.JobTitle,
+		p.MonthlyIncome, p.EmergencyContactName, p.EmergencyContactPhone,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert profil gagal: %w", err)
+	}
+
+	return nil
+}
+
+// GetProfileByUserID mengambil profil KYC pengguna berdasarkan user_id.
+func (r *postgresUserRepository) GetProfileByUserID(ctx context.Context, userID int64) (*model.UserProfile, error) {
+	query := `
+		SELECT user_id, nik, phone_number, address, job_title, 
+		       monthly_income, emergency_contact_name, emergency_contact_phone,
+		       created_at, updated_at
+		FROM   user_profiles
+		WHERE  user_id = $1
+		LIMIT  1
+	`
+
+	p := &model.UserProfile{}
+	err := r.db.QueryRowContext(ctx, query, userID).Scan(
+		&p.UserID, &p.NIK, &p.PhoneNumber, &p.Address, &p.JobTitle,
+		&p.MonthlyIncome, &p.EmergencyContactName, &p.EmergencyContactPhone,
+		&p.CreatedAt, &p.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrProfileNotFound
+		}
+		return nil, fmt.Errorf("query profil gagal: %w", err)
+	}
+
+	return p, nil
 }

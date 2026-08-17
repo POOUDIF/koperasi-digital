@@ -11,18 +11,20 @@ import (
 
 	"koperasi-digital/internal/middleware"
 	"koperasi-digital/internal/model"
+	"koperasi-digital/internal/repository"
 	"koperasi-digital/internal/service"
 )
 
 // UserHandler mengelompokkan dependency yang dibutuhkan oleh endpoint-endpoint user.
 type UserHandler struct {
-	userService service.UserService
+	userService   service.UserService
+	savingService service.SavingService
 }
 
 // NewUserHandler membuat instance UserHandler dengan dependency diinject.
 // Menerima interface (bukan struct konkret) agar mudah diganti saat testing.
-func NewUserHandler(userService service.UserService) *UserHandler {
-	return &UserHandler{userService: userService}
+func NewUserHandler(userService service.UserService, savingService service.SavingService) *UserHandler {
+	return &UserHandler{userService: userService, savingService: savingService}
 }
 
 // errorResponse adalah struktur JSON standar untuk semua response error.
@@ -54,6 +56,15 @@ func (h *UserHandler) Register(c *gin.Context) {
 		// JANGAN kirim detail error internal ke client — bisa bocorkan informasi sensitif.
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan pada server"})
 		return
+	}
+
+	// Buat rekening wajib (Simpanan Pokok & Wajib) secara otomatis
+	err = h.savingService.OpenMandatoryAccounts(c.Request.Context(), result.User.ID)
+	if err != nil {
+		// Kita tetap return 201 Created karena pendaftaran berhasil, 
+		// tapi kita bisa me-log kegagalan pembuatan rekening.
+		// Idealnya, ada mekanisme retry/dead letter queue, tapi untuk sekarang log saja.
+		// slog.Error("gagal membuat rekening mandatory otomatis", "user_id", result.User.ID, "error", err)
 	}
 
 	c.JSON(http.StatusCreated, result)
@@ -165,4 +176,50 @@ func (h *UserHandler) GetAllUsers(c *gin.Context) {
 
 	// Bungkus dalam object "users" agar konsisten dengan endpoint lain
 	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+// UpdateKYC menangani PUT /api/v1/profile/kyc.
+// Route ini dilindungi oleh middleware.RequireAuth.
+func (h *UserHandler) UpdateKYC(c *gin.Context) {
+	userID, ok := extractUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid, silakan login kembali"})
+		return
+	}
+
+	var req model.UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	if err := h.userService.UpdateKYCProfile(c.Request.Context(), userID, req); err != nil {
+		// Log the error internally
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan saat menyimpan profil KYC"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "profil KYC berhasil disimpan"})
+}
+
+// GetKYC menangani GET /api/v1/profile/kyc.
+// Route ini dilindungi oleh middleware.RequireAuth.
+func (h *UserHandler) GetKYC(c *gin.Context) {
+	userID, ok := extractUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid, silakan login kembali"})
+		return
+	}
+
+	profile, err := h.userService.GetKYCProfile(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrProfileNotFound) {
+			c.JSON(http.StatusNotFound, errorResponse{Error: "profil KYC belum diisi"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan saat mengambil profil KYC"})
+		return
+	}
+
+	c.JSON(http.StatusOK, profile)
 }

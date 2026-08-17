@@ -30,6 +30,9 @@ type SavingRepository interface {
 	// Mengembalikan ErrSavingsProductNotFound jika tidak ada.
 	FindProductByID(ctx context.Context, productID int64) (*model.SavingsProduct, error)
 
+	// GetMandatoryProducts mengambil semua produk simpanan yang wajib dimiliki anggota.
+	GetMandatoryProducts(ctx context.Context) ([]model.SavingsProduct, error)
+
 	// CreateAccount membuka rekening simpanan baru dengan saldo awal 0.
 	CreateAccount(ctx context.Context, account *model.SavingsAccount) (*model.SavingsAccount, error)
 
@@ -82,6 +85,41 @@ func (r *postgresSavingRepository) FindProductByID(ctx context.Context, productI
 	}
 
 	return p, nil
+}
+
+// GetMandatoryProducts mengambil semua produk simpanan yang diwajibkan (is_mandatory = TRUE).
+func (r *postgresSavingRepository) GetMandatoryProducts(ctx context.Context) ([]model.SavingsProduct, error) {
+	query := `
+		SELECT id, name, akad_type, min_deposit, profit_sharing_ratio, is_mandatory,
+		       created_at, updated_at
+		FROM   savings_products
+		WHERE  is_mandatory = TRUE
+		ORDER BY id ASC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query produk simpanan wajib gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var products []model.SavingsProduct
+	for rows.Next() {
+		var p model.SavingsProduct
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.AkadType, &p.MinDeposit, &p.ProfitSharingRatio,
+			&p.IsMandatory, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan produk simpanan wajib gagal: %w", err)
+		}
+		products = append(products, p)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi produk simpanan wajib gagal: %w", err)
+	}
+
+	return products, nil
 }
 
 // CreateAccount membuka rekening simpanan baru.

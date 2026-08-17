@@ -54,6 +54,12 @@ type UserService interface {
 
 	// GetAllUsers mengambil semua pengguna terdaftar (untuk super admin).
 	GetAllUsers(ctx context.Context) ([]model.User, error)
+
+	// UpdateKYCProfile memperbarui atau membuat data profil KYC pengguna.
+	UpdateKYCProfile(ctx context.Context, userID int64, req model.UpdateProfileRequest) error
+
+	// GetKYCProfile mengambil data profil KYC pengguna.
+	GetKYCProfile(ctx context.Context, userID int64) (*model.UserProfile, error)
 }
 
 // userService adalah implementasi konkret UserService.
@@ -195,6 +201,38 @@ func (s *userService) GetAllUsers(ctx context.Context) ([]model.User, error) {
 		return nil, fmt.Errorf("mengambil semua pengguna gagal: %w", err)
 	}
 	return users, nil
+}
+
+// UpdateKYCProfile menyimpan data profil KYC yang diperlukan sebelum melakukan transaksi tertentu.
+func (s *userService) UpdateKYCProfile(ctx context.Context, userID int64, req model.UpdateProfileRequest) error {
+	profile := &model.UserProfile{
+		UserID:                userID,
+		NIK:                   req.NIK,
+		PhoneNumber:           req.PhoneNumber,
+		Address:               req.Address,
+		JobTitle:              req.JobTitle,
+		MonthlyIncome:         req.MonthlyIncome,
+		EmergencyContactName:  req.EmergencyContactName,
+		EmergencyContactPhone: req.EmergencyContactPhone,
+	}
+
+	err := s.userRepo.UpsertProfile(ctx, profile)
+	if err != nil {
+		return fmt.Errorf("menyimpan profil KYC gagal: %w", err)
+	}
+	return nil
+}
+
+// GetKYCProfile mengambil profil KYC dari pengguna yang sedang login.
+func (s *userService) GetKYCProfile(ctx context.Context, userID int64) (*model.UserProfile, error) {
+	profile, err := s.userRepo.GetProfileByUserID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrProfileNotFound) {
+			return nil, repository.ErrProfileNotFound
+		}
+		return nil, fmt.Errorf("mengambil profil KYC gagal: %w", err)
+	}
+	return profile, nil
 }
 
 // generateToken membuat JWT yang ditandatangani dengan HMAC-SHA256 (HS256).
