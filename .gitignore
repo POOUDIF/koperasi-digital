@@ -13,3 +13,7 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+tmp_*.exe
+.idea
+.vscode
+.claude
