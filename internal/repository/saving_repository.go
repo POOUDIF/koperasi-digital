@@ -22,6 +22,9 @@ var (
 
 	// ErrAccountNotActive dikembalikan saat mencoba transaksi di rekening non-aktif.
 	ErrAccountNotActive = errors.New("rekening simpanan tidak aktif")
+
+	// ErrDepositRequestNotFound dikembalikan saat request setoran tidak ditemukan.
+	ErrDepositRequestNotFound = errors.New("permohonan setoran tidak ditemukan")
 )
 
 // SavingRepository mendefinisikan kontrak operasi database untuk modul simpanan.
@@ -49,6 +52,24 @@ type SavingRepository interface {
 
 	// GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
 	GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error)
+
+	// InsertDepositRequest menyimpan permohonan setoran baru.
+	InsertDepositRequest(ctx context.Context, req *model.DepositRequestModel) (*model.DepositRequestModel, error)
+
+	// UpdateDepositRequestStatus mengupdate status (approved/rejected).
+	UpdateDepositRequestStatus(ctx context.Context, tx *sql.Tx, requestID int64, status string, adminID int64) error
+
+	// GetDepositRequestsByUserID mengambil riwayat permohonan setoran milik anggota.
+	GetDepositRequestsByUserID(ctx context.Context, userID int64) ([]model.DepositRequestModel, error)
+
+	// GetAllDepositRequests mengambil semua permohonan setoran (untuk admin).
+	GetAllDepositRequests(ctx context.Context) ([]model.DepositRequestModel, error)
+
+	// GetDepositRequestByID mengambil satu permohonan berdasarkan ID.
+	GetDepositRequestByID(ctx context.Context, requestID int64) (*model.DepositRequestModel, error)
+
+	// BeginTx memulai transaction baru untuk digunakan di layer service.
+	BeginTx(ctx context.Context) (*sql.Tx, error)
 }
 
 // postgresSavingRepository adalah implementasi SavingRepository dengan PostgreSQL.
@@ -311,3 +332,126 @@ func (r *postgresSavingRepository) GetAllTransactions(ctx context.Context) ([]mo
 
 	return txs, nil
 }
+
+// InsertDepositRequest menyimpan permohonan setoran baru dengan status 'pending'.
+func (r *postgresSavingRepository) InsertDepositRequest(ctx context.Context, req *model.DepositRequestModel) (*model.DepositRequestModel, error) {
+	query := `
+		INSERT INTO deposit_requests (user_id, savings_account_id, amount, payment_method, proof_image_url, status, reference_id)
+		VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+		RETURNING id, status, created_at, updated_at
+	`
+	err := r.db.QueryRowContext(ctx, query,
+		req.UserID, req.SavingsAccountID, req.Amount, req.PaymentMethod, req.ProofImageURL, req.ReferenceID,
+	).Scan(&req.ID, &req.Status, &req.CreatedAt, &req.UpdatedAt)
+	
+	if err != nil {
+		return nil, fmt.Errorf("insert deposit request gagal: %w", err)
+	}
+	return req, nil
+}
+
+// UpdateDepositRequestStatus mengupdate status menjadi approved atau rejected.
+// Menggunakan parameter *sql.Tx agar bisa dijalankan dalam satu transaction saat approve (update balance).
+func (r *postgresSavingRepository) UpdateDepositRequestStatus(ctx context.Context, tx *sql.Tx, requestID int64, status string, adminID int64) error {
+	query := `
+		UPDATE deposit_requests
+		SET status = $1, reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
+		WHERE id = $3
+	`
+	var err error
+	if tx != nil {
+		_, err = tx.ExecContext(ctx, query, status, adminID, requestID)
+	} else {
+		_, err = r.db.ExecContext(ctx, query, status, adminID, requestID)
+	}
+
+	if err != nil {
+		return fmt.Errorf("update status deposit request gagal: %w", err)
+	}
+	return nil
+}
+
+// GetDepositRequestsByUserID mengambil daftar setoran per user.
+func (r *postgresSavingRepository) GetDepositRequestsByUserID(ctx context.Context, userID int64) ([]model.DepositRequestModel, error) {
+	query := `
+		SELECT id, user_id, savings_account_id, amount, payment_method, proof_image_url, status, reference_id, reviewed_by, reviewed_at, created_at, updated_at
+		FROM deposit_requests
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query deposit requests by user gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var reqs []model.DepositRequestModel
+	for rows.Next() {
+		var req model.DepositRequestModel
+		if err := rows.Scan(
+			&req.ID, &req.UserID, &req.SavingsAccountID, &req.Amount, &req.PaymentMethod,
+			&req.ProofImageURL, &req.Status, &req.ReferenceID, &req.ReviewedBy,
+			&req.ReviewedAt, &req.CreatedAt, &req.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan deposit requests gagal: %w", err)
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, nil
+}
+
+// GetAllDepositRequests mengambil semua permohonan setoran.
+func (r *postgresSavingRepository) GetAllDepositRequests(ctx context.Context) ([]model.DepositRequestModel, error) {
+	query := `
+		SELECT id, user_id, savings_account_id, amount, payment_method, proof_image_url, status, reference_id, reviewed_by, reviewed_at, created_at, updated_at
+		FROM deposit_requests
+		ORDER BY created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query all deposit requests gagal: %w", err)
+	}
+	defer rows.Close()
+
+	var reqs []model.DepositRequestModel
+	for rows.Next() {
+		var req model.DepositRequestModel
+		if err := rows.Scan(
+			&req.ID, &req.UserID, &req.SavingsAccountID, &req.Amount, &req.PaymentMethod,
+			&req.ProofImageURL, &req.Status, &req.ReferenceID, &req.ReviewedBy,
+			&req.ReviewedAt, &req.CreatedAt, &req.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan all deposit requests gagal: %w", err)
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, nil
+}
+
+// GetDepositRequestByID mengambil satu permohonan setoran berdasarkan ID.
+func (r *postgresSavingRepository) GetDepositRequestByID(ctx context.Context, requestID int64) (*model.DepositRequestModel, error) {
+	query := `
+		SELECT id, user_id, savings_account_id, amount, payment_method, proof_image_url, status, reference_id, reviewed_by, reviewed_at, created_at, updated_at
+		FROM deposit_requests
+		WHERE id = $1
+	`
+	var req model.DepositRequestModel
+	err := r.db.QueryRowContext(ctx, query, requestID).Scan(
+		&req.ID, &req.UserID, &req.SavingsAccountID, &req.Amount, &req.PaymentMethod,
+		&req.ProofImageURL, &req.Status, &req.ReferenceID, &req.ReviewedBy,
+		&req.ReviewedAt, &req.CreatedAt, &req.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrDepositRequestNotFound
+		}
+		return nil, fmt.Errorf("query deposit request by ID gagal: %w", err)
+	}
+	return &req, nil
+}
+
+// BeginTx memulai transaksi.
+func (r *postgresSavingRepository) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
+

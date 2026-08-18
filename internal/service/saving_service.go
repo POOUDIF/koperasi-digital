@@ -41,12 +41,20 @@ type SavingService interface {
 	// GetAccounts mengambil semua rekening simpanan milik user.
 	GetAccounts(ctx context.Context, userID int64) ([]model.SavingsAccount, error)
 
-	// DepositFund menyetor dana ke rekening simpanan.
-	// Memvalidasi kepemilikan rekening, status rekening, dan nominal minimum.
-	DepositFund(ctx context.Context, userID int64, req model.DepositRequest) error
+	// DepositFund membuat permohonan setoran dana (status pending).
+	DepositFund(ctx context.Context, userID int64, req model.DepositRequest) (*model.DepositRequestModel, error)
 
 	// GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
 	GetAllTransactions(ctx context.Context) ([]model.SavingsTransaction, error)
+
+	// GetDepositRequests mengambil riwayat setoran per user.
+	GetDepositRequests(ctx context.Context, userID int64) ([]model.DepositRequestModel, error)
+
+	// GetAllDepositRequestsAdmin mengambil semua riwayat setoran (khusus admin).
+	GetAllDepositRequestsAdmin(ctx context.Context) ([]model.DepositRequestModel, error)
+
+	// ReviewDeposit memproses review admin (approve/reject).
+	ReviewDeposit(ctx context.Context, adminID int64, requestID int64, req model.ReviewDepositRequest) error
 }
 
 // savingService adalah implementasi konkret SavingService.
@@ -121,51 +129,47 @@ func (s *savingService) GetAccounts(ctx context.Context, userID int64) ([]model.
 	return accounts, nil
 }
 
-// DepositFund memproses setoran dana ke rekening simpanan.
-// Aturan bisnis yang divalidasi (secara berurutan):
-func (s *savingService) DepositFund(ctx context.Context, userID int64, req model.DepositRequest) error {
+// DepositFund membuat permohonan setoran dana (status pending).
+func (s *savingService) DepositFund(ctx context.Context, userID int64, req model.DepositRequest) (*model.DepositRequestModel, error) {
 	// --- Langkah 1: Ambil rekening & validasi kepemilikan ---
 	account, err := s.savingRepo.GetAccountByID(ctx, req.AccountID)
 	if err != nil {
 		if errors.Is(err, repository.ErrSavingsAccountNotFound) {
-			return ErrSavingsAccountNotFound
+			return nil, ErrSavingsAccountNotFound
 		}
-		return fmt.Errorf("mengambil data rekening gagal: %w", err)
+		return nil, fmt.Errorf("mengambil data rekening gagal: %w", err)
 	}
 
-	// Authorization check: rekening harus milik user yang sedang melakukan request.
-	// Kembalikan ErrSavingsAccountNotFound (bukan error "akses ditolak") agar
 	if account.UserID != userID {
-		return ErrSavingsAccountNotFound
+		return nil, ErrSavingsAccountNotFound
 	}
 
 	// --- Langkah 2: Validasi nominal vs min_deposit produk ---
 	product, err := s.savingRepo.FindProductByID(ctx, account.SavingsProductID)
 	if err != nil {
-		// Ini seharusnya tidak terjadi jika FK constraint database berjalan normal,
-		// tapi kita tangani agar service tidak panic jika data tidak konsisten.
-		return fmt.Errorf("mengambil data produk simpanan gagal: %w", err)
+		return nil, fmt.Errorf("mengambil data produk simpanan gagal: %w", err)
 	}
 
 	if req.Amount < product.MinDeposit {
-		// Sematkan nilai minimum di pesan error agar handler bisa meneruskannya
-		// ke client tanpa perlu query database lagi.
-		return fmt.Errorf("%w: minimum Rp %.0f", ErrDepositBelowMinimum, product.MinDeposit)
+		return nil, fmt.Errorf("%w: minimum Rp %.0f", ErrDepositBelowMinimum, product.MinDeposit)
 	}
 
-	// --- Langkah 3: Eksekusi setoran secara atomik ---
-	// Semua operasi database (lock, update balance, insert log) terjadi di dalam
-	if err := s.savingRepo.Deposit(ctx, req.AccountID, req.Amount, req.ReferenceID); err != nil {
-		if errors.Is(err, repository.ErrAccountNotActive) {
-			return ErrAccountNotActive
-		}
-		if errors.Is(err, repository.ErrSavingsAccountNotFound) {
-			return ErrSavingsAccountNotFound
-		}
-		return fmt.Errorf("setoran gagal: %w", err)
+	// --- Langkah 3: Insert Deposit Request ---
+	depositModel := &model.DepositRequestModel{
+		UserID:           userID,
+		SavingsAccountID: req.AccountID,
+		Amount:           req.Amount,
+		PaymentMethod:    req.PaymentMethod,
+		ProofImageURL:    req.ProofImageURL,
+		ReferenceID:      req.ReferenceID,
 	}
 
-	return nil
+	createdReq, err := s.savingRepo.InsertDepositRequest(ctx, depositModel)
+	if err != nil {
+		return nil, fmt.Errorf("menyimpan permohonan setoran gagal: %w", err)
+	}
+
+	return createdReq, nil
 }
 
 // GetAllTransactions mengambil semua mutasi (log) dari semua rekening simpanan.
@@ -175,4 +179,46 @@ func (s *savingService) GetAllTransactions(ctx context.Context) ([]model.Savings
 		return nil, fmt.Errorf("mengambil daftar semua transaksi simpanan gagal: %w", err)
 	}
 	return txs, nil
+}
+
+func (s *savingService) GetDepositRequests(ctx context.Context, userID int64) ([]model.DepositRequestModel, error) {
+	return s.savingRepo.GetDepositRequestsByUserID(ctx, userID)
+}
+
+func (s *savingService) GetAllDepositRequestsAdmin(ctx context.Context) ([]model.DepositRequestModel, error) {
+	return s.savingRepo.GetAllDepositRequests(ctx)
+}
+
+func (s *savingService) ReviewDeposit(ctx context.Context, adminID int64, requestID int64, req model.ReviewDepositRequest) error {
+	depositReq, err := s.savingRepo.GetDepositRequestByID(ctx, requestID)
+	if err != nil {
+		if errors.Is(err, repository.ErrDepositRequestNotFound) {
+			return repository.ErrDepositRequestNotFound
+		}
+		return fmt.Errorf("gagal mengambil deposit request: %w", err)
+	}
+
+	if depositReq.Status != "pending" {
+		return errors.New("permohonan setoran sudah direview sebelumnya")
+	}
+
+	if req.Action == "reject" {
+		return s.savingRepo.UpdateDepositRequestStatus(ctx, nil, requestID, "rejected", adminID)
+	}
+
+	if req.Action == "approve" {
+		// 1. Eksekusi penambahan balance
+		err := s.savingRepo.Deposit(ctx, depositReq.SavingsAccountID, depositReq.Amount, depositReq.ReferenceID)
+		if err != nil {
+			return fmt.Errorf("gagal menyetujui setoran: %w", err)
+		}
+
+		// 2. Update status request
+		err = s.savingRepo.UpdateDepositRequestStatus(ctx, nil, requestID, "approved", adminID)
+		if err != nil {
+			return fmt.Errorf("setoran berhasil tapi gagal update status request: %w", err)
+		}
+	}
+
+	return nil
 }

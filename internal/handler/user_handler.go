@@ -59,7 +59,7 @@ func (h *UserHandler) Register(c *gin.Context) {
 	}
 
 	// Buat rekening wajib (Simpanan Pokok & Wajib) secara otomatis
-	err = h.savingService.OpenMandatoryAccounts(c.Request.Context(), result.User.ID)
+	err = h.savingService.OpenMandatoryAccounts(c.Request.Context(), result.ID)
 	if err != nil {
 		// Kita tetap return 201 Created karena pendaftaran berhasil, 
 		// tapi kita bisa me-log kegagalan pembuatan rekening.
@@ -67,7 +67,10 @@ func (h *UserHandler) Register(c *gin.Context) {
 		// slog.Error("gagal membuat rekening mandatory otomatis", "user_id", result.User.ID, "error", err)
 	}
 
-	c.JSON(http.StatusCreated, result)
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Registrasi berhasil, OTP telah dikirim ke email Anda. Silakan verifikasi untuk login.",
+		"user_id": result.ID,
+	})
 }
 
 // Login menangani POST /api/v1/login.
@@ -93,7 +96,35 @@ func (h *UserHandler) Login(c *gin.Context) {
 			c.JSON(http.StatusForbidden, errorResponse{Error: err.Error()})
 			return
 		}
+		if errors.Is(err, service.ErrEmailNotVerified) {
+			// 403 Forbidden — email belum diverifikasi
+			c.JSON(http.StatusForbidden, errorResponse{Error: err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan pada server"})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// VerifyEmail menangani POST /api/v1/verify-email.
+func (h *UserHandler) VerifyEmail(c *gin.Context) {
+	var req model.VerifyEmailRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	result, err := h.userService.VerifyEmail(c.Request.Context(), req)
+	if err != nil {
+		if errors.Is(err, service.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, errorResponse{Error: "email tidak ditemukan"})
+			return
+		}
+		// Error OTP tidak cocok atau kedaluwarsa
+		c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
 		return
 	}
 
@@ -214,7 +245,8 @@ func (h *UserHandler) GetKYC(c *gin.Context) {
 	profile, err := h.userService.GetKYCProfile(c.Request.Context(), userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrProfileNotFound) {
-			c.JSON(http.StatusNotFound, errorResponse{Error: "profil KYC belum diisi"})
+			// Frontend mengharapkan 200 OK dengan data kosong saat form baru akan diisi
+			c.JSON(http.StatusOK, &model.UserProfile{})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "terjadi kesalahan saat mengambil profil KYC"})

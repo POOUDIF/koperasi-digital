@@ -91,7 +91,35 @@ type DepositRequest struct {
 	// Amount adalah nominal setoran — harus positif.
 	Amount float64 `json:"amount" binding:"required,gt=0"`
 
+	// PaymentMethod adalah cara pembayaran (misal: "manual_transfer")
+	PaymentMethod string `json:"payment_method" binding:"required"`
+
+	// ProofImageURL adalah link gambar bukti transfer (opsional jika VA, wajib jika manual, tapi kita buat opsional dulu)
+	ProofImageURL string `json:"proof_image_url"`
+
 	// ReferenceID adalah nomor referensi eksternal (opsional).
 	// Contoh: nomor bukti transfer, kode teller, dsb.
 	ReferenceID string `json:"reference_id"`
 }
+
+// DepositRequestModel merepresentasikan tabel deposit_requests di database.
+type DepositRequestModel struct {
+	ID               int64      `db:"id" json:"id"`
+	UserID           int64      `db:"user_id" json:"user_id"`
+	SavingsAccountID int64      `db:"savings_account_id" json:"savings_account_id"`
+	Amount           float64    `db:"amount" json:"amount"`
+	PaymentMethod    string     `db:"payment_method" json:"payment_method"`
+	ProofImageURL    string     `db:"proof_image_url" json:"proof_image_url"`
+	Status           string     `db:"status" json:"status"`
+	ReferenceID      string     `db:"reference_id" json:"reference_id"`
+	ReviewedBy       *int64     `db:"reviewed_by" json:"reviewed_by"`
+	ReviewedAt       *time.Time `db:"reviewed_at" json:"reviewed_at"`
+	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// ReviewDepositRequest adalah payload JSON untuk admin menyetujui/menolak setoran.
+type ReviewDepositRequest struct {
+	Action string `json:"action" binding:"required,oneof=approve reject"`
+}
+

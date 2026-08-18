@@ -4,8 +4,10 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -22,6 +24,7 @@ var (
 	ErrInvalidCredentials = errors.New("email atau password salah")
 	ErrEmailAlreadyExists = errors.New("email sudah terdaftar")
 	ErrUserNotFound       = errors.New("user tidak ditemukan")
+	ErrEmailNotVerified   = errors.New("email belum diverifikasi, periksa kotak masuk Anda")
 
 	// ErrAccountSuspended dikembalikan saat user mencoba login dengan akun
 	// yang berstatus 'inactive' atau 'banned'.
@@ -39,11 +42,15 @@ type jwtClaims struct {
 // UserService mendefinisikan kontrak logika bisnis untuk entitas User.
 // Handler layer hanya bergantung pada interface ini — bukan implementasi konkret.
 type UserService interface {
-	// Register memvalidasi data, meng-hash password, menyimpan user, lalu mengembalikan token.
-	Register(ctx context.Context, req model.RegisterRequest) (*model.AuthResponse, error)
+	// Register memvalidasi data, meng-hash password, menyimpan user, lalu mengirimkan OTP ke email.
+	// Kita kembalikan objek User (tanpa token) agar handler bisa mendapatkan UserID untuk membuka rekening wajib.
+	Register(ctx context.Context, req model.RegisterRequest) (*model.User, error)
 
 	// Login memverifikasi kredensial dan mengembalikan token JWT jika valid.
 	Login(ctx context.Context, req model.LoginRequest) (*model.AuthResponse, error)
+
+	// VerifyEmail memverifikasi OTP dan mengembalikan token JWT jika berhasil.
+	VerifyEmail(ctx context.Context, req model.VerifyEmailRequest) (*model.AuthResponse, error)
 
 	// GetProfile mengambil data user berdasarkan ID.
 	// Dipanggil setelah middleware memverifikasi JWT dan menyematkan user_id ke context.
@@ -65,6 +72,7 @@ type UserService interface {
 // userService adalah implementasi konkret UserService.
 type userService struct {
 	userRepo  repository.UserRepository // dependency ke repository layer
+	emailSvc  EmailService              // dependency ke email service
 	jwtSecret []byte                    // kunci penandatangan token JWT
 	jwtTTL    time.Duration             // masa berlaku token
 	rdb       *redis.Client             // redis connection
@@ -74,12 +82,14 @@ type userService struct {
 // Menerima:
 func NewUserService(
 	userRepo repository.UserRepository,
+	emailSvc EmailService,
 	jwtSecret string,
 	jwtTTL time.Duration,
 	rdb *redis.Client,
 ) UserService {
 	return &userService{
 		userRepo:  userRepo,
+		emailSvc:  emailSvc,
 		jwtSecret: []byte(jwtSecret),
 		jwtTTL:    jwtTTL,
 		rdb:       rdb,
@@ -88,9 +98,8 @@ func NewUserService(
 
 // Register menangani pendaftaran anggota koperasi baru.
 // Urutan langkah:
-func (s *userService) Register(ctx context.Context, req model.RegisterRequest) (*model.AuthResponse, error) {
+func (s *userService) Register(ctx context.Context, req model.RegisterRequest) (*model.User, error) {
 	// Langkah 1: Hash password.
-	// bcrypt.DefaultCost = 10. Kita naikkan ke 12 untuk resistansi brute-force
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 	if err != nil {
 		return nil, fmt.Errorf("hashing password gagal: %w", err)
@@ -105,24 +114,33 @@ func (s *userService) Register(ctx context.Context, req model.RegisterRequest) (
 
 	savedUser, err := s.userRepo.Insert(ctx, newUser)
 	if err != nil {
-		// Terjemahkan error repository ke error service agar handler tidak perlu
-		// tahu detail package repository.
 		if errors.Is(err, repository.ErrEmailAlreadyExists) {
 			return nil, ErrEmailAlreadyExists
 		}
 		return nil, fmt.Errorf("menyimpan user gagal: %w", err)
 	}
 
-	// Langkah 3: Generate JWT.
-	token, err := s.generateToken(savedUser)
+	// Langkah 3: Generate OTP 6 digit
+	n, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+	otp := fmt.Sprintf("%06d", n.Int64())
+
+	// Langkah 4: Simpan OTP di Redis, berlaku 15 menit
+	redisKey := fmt.Sprintf("otp:%s", req.Email)
+	err = s.rdb.Set(ctx, redisKey, otp, 15*time.Minute).Err()
 	if err != nil {
-		return nil, fmt.Errorf("generate token gagal: %w", err)
+		// Log error, tetapi kita biarkan user tersimpan.
+		return nil, fmt.Errorf("menyimpan OTP gagal: %w", err)
 	}
 
-	return &model.AuthResponse{
-		Token: token,
-		User:  *savedUser,
-	}, nil
+	// Langkah 5: Kirim OTP ke Email
+	err = s.emailSvc.SendOTPEmail(ctx, req.Email, otp)
+	if err != nil {
+		// Log error email, tetapi jangan hentikan proses registrasi.
+		fmt.Printf("Gagal mengirim email ke %s: %v\n", req.Email, err)
+	}
+
+	// Kita tidak mengembalikan token, melainkan objek user saja
+	return savedUser, nil
 }
 
 // Login memverifikasi kredensial anggota koperasi.
@@ -144,13 +162,60 @@ func (s *userService) Login(ctx context.Context, req model.LoginRequest) (*model
 		return nil, ErrInvalidCredentials
 	}
 
-	// Langkah 3: Validasi status akun.
-	// Pemeriksaan ini dilakukan SETELAH verifikasi password berhasil.
+	// Langkah 3: Validasi status akun dan verifikasi email.
+	if !user.IsEmailVerified {
+		return nil, ErrEmailNotVerified
+	}
+
 	if user.Status != "active" {
 		return nil, ErrAccountSuspended
 	}
 
 	// Langkah 4: Generate JWT.
+	token, err := s.generateToken(user)
+	if err != nil {
+		return nil, fmt.Errorf("generate token gagal: %w", err)
+	}
+
+	return &model.AuthResponse{
+		Token: token,
+		User:  *user,
+	}, nil
+}
+
+// VerifyEmail memverifikasi kode OTP yang diberikan oleh pengguna.
+func (s *userService) VerifyEmail(ctx context.Context, req model.VerifyEmailRequest) (*model.AuthResponse, error) {
+	// Ambil OTP dari Redis
+	redisKey := fmt.Sprintf("otp:%s", req.Email)
+	storedOTP, err := s.rdb.Get(ctx, redisKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, errors.New("kode OTP sudah kedaluwarsa atau tidak valid")
+		}
+		return nil, fmt.Errorf("gagal mengecek OTP: %w", err)
+	}
+
+	if storedOTP != req.OTP {
+		return nil, errors.New("kode OTP salah")
+	}
+
+	// Hapus OTP dari Redis karena sudah digunakan
+	_ = s.rdb.Del(ctx, redisKey)
+
+	// Ambil user dari database
+	user, err := s.userRepo.FindByEmail(ctx, req.Email)
+	if err != nil {
+		return nil, ErrUserNotFound
+	}
+
+	// Update is_email_verified menjadi true
+	err = s.userRepo.VerifyEmail(ctx, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("gagal memverifikasi email: %w", err)
+	}
+	user.IsEmailVerified = true
+
+	// Setelah terverifikasi, langsung generate Token JWT agar user auto-login
 	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, fmt.Errorf("generate token gagal: %w", err)

@@ -24,6 +24,9 @@ type User struct {
 	// active   : bisa login dan melakukan semua transaksi.
 	Status string `db:"status" json:"status"`
 
+	// Menandakan apakah email sudah diverifikasi via OTP
+	IsEmailVerified bool `db:"is_email_verified" json:"is_email_verified"`
+
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -40,6 +43,12 @@ type RegisterRequest struct {
 type LoginRequest struct {
 	Email    string `json:"email"    binding:"required,email"`
 	Password string `json:"password" binding:"required"`
+}
+
+// VerifyEmailRequest adalah payload JSON untuk memverifikasi OTP.
+type VerifyEmailRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	OTP   string `json:"otp"   binding:"required,len=6"`
 }
 
 // AuthResponse adalah respons yang dikembalikan setelah register atau login berhasil.

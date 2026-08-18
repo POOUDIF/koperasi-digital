@@ -10,6 +10,7 @@ import (
 
 	"koperasi-digital/internal/middleware"
 	"koperasi-digital/internal/model"
+	"koperasi-digital/internal/repository"
 	"koperasi-digital/internal/service"
 )
 
@@ -99,22 +100,16 @@ func (h *SavingHandler) Deposit(c *gin.Context) {
 		return
 	}
 
-	err := h.savingService.DepositFund(c.Request.Context(), userID, req)
+	reqModel, err := h.savingService.DepositFund(c.Request.Context(), userID, req)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrSavingsAccountNotFound):
-			// Rekening tidak ditemukan ATAU bukan milik user ini.
-			// Respons 404 (bukan 403) untuk mencegah enumerasi ID rekening.
 			c.JSON(http.StatusNotFound, errorResponse{Error: "rekening simpanan tidak ditemukan"})
 
 		case errors.Is(err, service.ErrAccountNotActive):
-			// 422 Unprocessable Entity: request valid secara format, tapi tidak bisa diproses
-			// karena kondisi bisnis tidak terpenuhi (rekening dibekukan/ditutup).
 			c.JSON(http.StatusUnprocessableEntity, errorResponse{Error: "rekening simpanan tidak aktif"})
 
 		case errors.Is(err, service.ErrDepositBelowMinimum):
-			// Pesan error sudah menyertakan nilai minimum dari service layer,
-			// sehingga client bisa menampilkannya langsung ke user.
 			c.JSON(http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
 
 		default:
@@ -123,7 +118,7 @@ func (h *SavingHandler) Deposit(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "setoran berhasil"})
+	c.JSON(http.StatusCreated, reqModel)
 }
 
 // GetAllTransactions menangani GET /api/v1/admin/transactions/saving.
@@ -137,3 +132,67 @@ func (h *SavingHandler) GetAllTransactions(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"transactions": txs})
 }
+
+// GetDepositRequests menangani GET /api/v1/savings/deposit-requests.
+func (h *SavingHandler) GetDepositRequests(c *gin.Context) {
+	userID, ok := extractUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid"})
+		return
+	}
+
+	reqs, err := h.savingService.GetDepositRequests(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil riwayat setoran"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deposit_requests": reqs})
+}
+
+// GetAllDepositRequestsAdmin menangani GET /api/v1/admin/savings/deposit-requests.
+func (h *SavingHandler) GetAllDepositRequestsAdmin(c *gin.Context) {
+	reqs, err := h.savingService.GetAllDepositRequestsAdmin(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "gagal mengambil semua riwayat setoran"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deposit_requests": reqs})
+}
+
+// ReviewDeposit menangani PUT /api/v1/admin/savings/deposit-requests/:id/review.
+func (h *SavingHandler) ReviewDeposit(c *gin.Context) {
+	adminID, ok := extractUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, errorResponse{Error: "sesi tidak valid"})
+		return
+	}
+
+	var uri struct {
+		ID int64 `uri:"id" binding:"required,gt=0"`
+	}
+	if err := c.ShouldBindUri(&uri); err != nil {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "ID request tidak valid"})
+		return
+	}
+
+	var req model.ReviewDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+
+	err := h.savingService.ReviewDeposit(c.Request.Context(), adminID, uri.ID, req)
+	if err != nil {
+		if errors.Is(err, repository.ErrDepositRequestNotFound) {
+			c.JSON(http.StatusNotFound, errorResponse{Error: "permohonan setoran tidak ditemukan"})
+			return
+		}
+		c.JSON(http.StatusUnprocessableEntity, errorResponse{Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "review setoran berhasil disimpan"})
+}
+

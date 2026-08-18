@@ -45,6 +45,13 @@ type Config struct {
 	// GoldContractAddress adalah alamat Smart Contract CoopGold di Polygon.
 	// Format: "0x" + 40 karakter hexadecimal.
 	GoldContractAddress string
+
+	// SMTP
+	SMTPHost      string
+	SMTPPort      string
+	SMTPUser      string
+	SMTPPassword  string
+	SMTPFromEmail string
 }
 
 // DBConfig menyimpan parameter koneksi PostgreSQL beserta pengaturan connection pool.
@@ -92,6 +99,13 @@ func Load() *Config {
 		// Blockchain — Smart Contract
 		OwnerPrivateKey:     getEnv("OWNER_PRIVATE_KEY", ""),
 		GoldContractAddress: getEnv("GOLD_CONTRACT_ADDRESS", ""),
+
+		// SMTP Config
+		SMTPHost:      getEnv("SMTP_HOST", "smtp.gmail.com"),
+		SMTPPort:      getEnv("SMTP_PORT", "587"),
+		SMTPUser:      getEnv("SMTP_USER", ""),
+		SMTPPassword:  getEnv("SMTP_PASSWORD", ""),
+		SMTPFromEmail: getEnv("SMTP_FROM_EMAIL", "noreply@koperasi-digital.com"),
 
 		DB: DBConfig{
 			Host:     getEnv("DB_HOST", "localhost"),

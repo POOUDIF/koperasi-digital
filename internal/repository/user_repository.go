@@ -43,6 +43,9 @@ type UserRepository interface {
 	// GetAll mengambil semua data user dari database.
 	GetAll(ctx context.Context) ([]model.User, error)
 
+	// VerifyEmail menandai email user sebagai terverifikasi (TRUE).
+	VerifyEmail(ctx context.Context, userID int64) error
+
 	// UpsertProfile menyimpan atau memperbarui profil KYC user.
 	UpsertProfile(ctx context.Context, profile *model.UserProfile) error
 
@@ -68,13 +71,13 @@ func (r *postgresUserRepository) Insert(ctx context.Context, user *model.User) (
 	query := `
 		INSERT INTO users (nama_lengkap, email, password_hash)
 		VALUES ($1, $2, $3)
-		RETURNING id, role, wallet_address, status, created_at, updated_at
+		RETURNING id, role, wallet_address, status, is_email_verified, created_at, updated_at
 	`
 
 	row := r.db.QueryRowContext(ctx, query, user.NamaLengkap, user.Email, user.PasswordHash)
 
 	err := row.Scan(
-		&user.ID, &user.Role, &user.WalletAddress, &user.Status,
+		&user.ID, &user.Role, &user.WalletAddress, &user.Status, &user.IsEmailVerified,
 		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
@@ -93,7 +96,7 @@ func (r *postgresUserRepository) Insert(ctx context.Context, user *model.User) (
 // Dipakai oleh GetProfile setelah middleware memverifikasi JWT — kita sudah
 func (r *postgresUserRepository) FindByID(ctx context.Context, id int64) (*model.User, error) {
 	query := `
-		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at
+		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, is_email_verified, created_at, updated_at
 		FROM   users
 		WHERE  id = $1
 		LIMIT  1
@@ -108,6 +111,7 @@ func (r *postgresUserRepository) FindByID(ctx context.Context, id int64) (*model
 		&user.Role,
 		&user.WalletAddress,
 		&user.Status,
+		&user.IsEmailVerified,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -125,7 +129,7 @@ func (r *postgresUserRepository) FindByID(ctx context.Context, id int64) (*model
 // sql.ErrNoRows (dikembalikan saat tidak ada baris yang cocok) diterjemahkan
 func (r *postgresUserRepository) FindByEmail(ctx context.Context, email string) (*model.User, error) {
 	query := `
-		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at
+		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, is_email_verified, created_at, updated_at
 		FROM   users
 		WHERE  email = $1
 		LIMIT  1
@@ -140,6 +144,7 @@ func (r *postgresUserRepository) FindByEmail(ctx context.Context, email string) 
 		&user.Role,
 		&user.WalletAddress,
 		&user.Status,
+		&user.IsEmailVerified,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -156,7 +161,7 @@ func (r *postgresUserRepository) FindByEmail(ctx context.Context, email string) 
 // GetAll mengambil semua baris dari tabel users.
 func (r *postgresUserRepository) GetAll(ctx context.Context) ([]model.User, error) {
 	query := `
-		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, created_at, updated_at
+		SELECT id, nama_lengkap, email, password_hash, role, wallet_address, status, is_email_verified, created_at, updated_at
 		FROM   users
 		ORDER BY created_at DESC
 	`
@@ -178,6 +183,7 @@ func (r *postgresUserRepository) GetAll(ctx context.Context) ([]model.User, erro
 			&u.Role,
 			&u.WalletAddress,
 			&u.Status,
+			&u.IsEmailVerified,
 			&u.CreatedAt,
 			&u.UpdatedAt,
 		); err != nil {
@@ -249,4 +255,18 @@ func (r *postgresUserRepository) GetProfileByUserID(ctx context.Context, userID 
 	}
 
 	return p, nil
+}
+
+// VerifyEmail menandai is_email_verified menjadi true
+func (r *postgresUserRepository) VerifyEmail(ctx context.Context, userID int64) error {
+	query := `
+		UPDATE users 
+		SET is_email_verified = TRUE, updated_at = NOW() 
+		WHERE id = $1
+	`
+	_, err := r.db.ExecContext(ctx, query, userID)
+	if err != nil {
+		return fmt.Errorf("update email verified gagal: %w", err)
+	}
+	return nil
 }

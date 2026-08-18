@@ -193,8 +193,12 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 	goldRepo := repository.NewGoldRepository(db, rdb)
 
 	// Layer 2: Service — tahu tentang Repository (via interface), bukan *sql.DB
+	emailSvc := service.NewEmailService(
+		cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFromEmail,
+	)
 	userSvc := service.NewUserService(
 		userRepo,
+		emailSvc,
 		cfg.JWTSecret,
 		cfg.JWTTokenTTL,
 		rdb,
@@ -221,6 +225,7 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		// Dilindungi oleh rate limiter agar tidak bisa dispam untuk eksploitasi brute-force/BOT.
 		v1.POST("/register", middleware.RateLimit(), userH.Register)
 		v1.POST("/login", middleware.RateLimit(), userH.Login)
+		v1.POST("/verify-email", middleware.RateLimit(), userH.VerifyEmail)
 		v1.GET("/gold/price", goldH.GetPrice) // Harga emas publik
 
 		// Endpoint terproteksi — setiap route di grup ini wajib menyertakan
@@ -238,7 +243,8 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 			// --- Modul Simpanan Syariah ---
 			protected.POST("/savings/accounts", savingH.OpenAccount) // Buka rekening baru
 			protected.GET("/savings/accounts", savingH.GetAccounts)  // Lihat semua rekening & saldo
-			protected.POST("/savings/deposit", savingH.Deposit)      // Setor tunai
+			protected.POST("/savings/deposit", savingH.Deposit)      // Setor tunai (pending)
+			protected.GET("/savings/deposit-requests", savingH.GetDepositRequests) // Lihat riwayat request setoran
 
 			// --- Modul Pembiayaan Syariah (anggota) ---
 			protected.POST("/financing/apply", financingH.Apply)                         // Ajukan pembiayaan baru
@@ -260,6 +266,10 @@ func setupRouter(cfg *config.Config, db *sql.DB, rdb *redis.Client, evmClient *b
 		{
 			// Review pengajuan pembiayaan: approve atau reject.
 			admin.PUT("/financing/:id/review", financingH.Review)
+			
+			// Review setoran simpanan: approve atau reject.
+			admin.PUT("/savings/deposit-requests/:id/review", savingH.ReviewDeposit)
+			admin.GET("/savings/deposit-requests", savingH.GetAllDepositRequestsAdmin)
 			
 			// Dashboard super admin: melihat semua data dan transaksi.
 			admin.GET("/users", userH.GetAllUsers)
